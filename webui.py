@@ -30,6 +30,10 @@ PAGE = """<!doctype html>
     button { border: 0; border-radius: 6px; padding: .7rem 1.25rem; margin: 0 .2rem; font-size: 1rem; cursor: pointer; }
     #predict { background: #4d8df7; color: white; } #clear { background: #2b3440; color: white; }
     #result { min-height: 2rem; margin-top: 1.25rem; font-size: 1.35rem; font-weight: 700; }
+    #confidences { margin-top: 1rem; text-align: left; }
+    .confidence { display: grid; grid-template-columns: 5.5rem 1fr 3.5rem; gap: .5rem; align-items: center; margin: .35rem 0; font-size: .88rem; }
+    .bar { height: .55rem; background: #2b3440; border-radius: 99px; overflow: hidden; }
+    .fill { height: 100%; background: #4d8df7; border-radius: 99px; }
     #model { font-size: .8rem; overflow-wrap: anywhere; }
   </style>
 </head>
@@ -39,6 +43,7 @@ PAGE = """<!doctype html>
   <canvas id="canvas" width="280" height="280"></canvas>
   <div><button id="predict">Predict</button><button id="clear">Clear</button></div>
   <div id="result">Draw a sample</div>
+  <div id="confidences"></div>
   <p id="model">{{ checkpoint }}</p>
 </main>
 <script>
@@ -55,13 +60,16 @@ canvas.addEventListener('pointerdown', e => { drawing=true; last=null; canvas.se
 canvas.addEventListener('pointermove', e => { if (drawing) stroke(e); });
 canvas.addEventListener('pointerup', () => { drawing=false; last=null; });
 canvas.addEventListener('pointercancel', () => { drawing=false; last=null; });
-document.getElementById('clear').onclick = () => { ctx.fillStyle='black'; ctx.fillRect(0,0,canvas.width,canvas.height); document.getElementById('result').textContent='Draw a sample'; };
+document.getElementById('clear').onclick = () => { ctx.fillStyle='black'; ctx.fillRect(0,0,canvas.width,canvas.height); document.getElementById('result').textContent='Draw a sample'; document.getElementById('confidences').innerHTML=''; };
 document.getElementById('predict').onclick = async () => {
   const result = document.getElementById('result'); result.textContent='Predicting…';
   try {
     const response = await fetch('/predict', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({image:canvas.toDataURL('image/png')})});
     const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Prediction failed');
     result.textContent = `Prediction: ${data.label} (${(data.confidence*100).toFixed(1)}% confidence)`;
+    document.getElementById('confidences').innerHTML = data.confidences.map(item =>
+      `<div class="confidence"><span>${item.label}</span><div class="bar"><div class="fill" style="width:${item.confidence*100}%"></div></div><span>${(item.confidence*100).toFixed(1)}%</span></div>`
+    ).join('');
   } catch (error) { result.textContent = error.message; }
 };
 </script></body></html>"""
@@ -85,7 +93,15 @@ def create_app(model: torch.nn.Module, device: torch.device, checkpoint: str, da
             with torch.no_grad():
                 probabilities = model(pixels).softmax(1)[0]
             prediction = int(probabilities.argmax())
-            return jsonify(label=labels[prediction], confidence=float(probabilities[prediction]))
+            confidence_values = [float(value) for value in probabilities]
+            return jsonify(
+                label=labels[prediction],
+                confidence=confidence_values[prediction],
+                confidences=[
+                    {"label": label, "confidence": confidence}
+                    for label, confidence in zip(labels, confidence_values)
+                ],
+            )
         except Exception as exc:
             return jsonify(error=str(exc)), 400
 
