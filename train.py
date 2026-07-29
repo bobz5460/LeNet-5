@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import resource
 import urllib.request
 from pathlib import Path
 
@@ -152,7 +153,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="data-loader worker processes (defaults to all CPU cores)")
+    parser.add_argument("--workers", type=int, default=None, help="data-loader worker processes (auto-capped for system resources)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--quickdraw-limit", type=int, default=10_000, help="training examples per class for Quick, Draw! (0 = all)")
     args = parser.parse_args()
@@ -161,12 +162,21 @@ def main() -> None:
     torch.set_num_threads(cpu_cores)
     torch.set_num_interop_threads(min(cpu_cores, 4))
     set_seed(args.seed)
+    # Each worker needs several multiprocessing pipes/file descriptors. A
+    # worker per core is unsafe on large servers even though model operators
+    # can still use every CPU core.
+    soft_fd_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    requested_workers = min(cpu_cores, 16) if args.workers is None else max(0, args.workers)
+    fd_safe_workers = max(0, (soft_fd_limit - 64) // 16)
+    workers = min(requested_workers, fd_safe_workers, 16)
+    if workers != requested_workers:
+        print(f"Using {workers} data-loader workers (requested {requested_workers}; file-descriptor safe limit is {soft_fd_limit})")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
         print(f"CUDA enabled: {torch.cuda.get_device_name(0)}")
     quickdraw_limit = args.quickdraw_limit or 10**9
-    train_loader, test_loader = make_loaders(args.dataset, args.data_dir, args.batch_size, args.workers, quickdraw_limit)
+    train_loader, test_loader = make_loaders(args.dataset, args.data_dir, args.batch_size, workers, quickdraw_limit)
     model = LeNet5().to(device)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
