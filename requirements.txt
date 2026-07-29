@@ -2,3 +2,4 @@ torch>=2.0
 torchvision>=0.15
 Pillow>=9.0
 numpy>=1.23
+Flask>=3.0

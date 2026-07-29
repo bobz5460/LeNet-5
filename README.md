@@ -1,6 +1,6 @@
 # LeNet-5 MNIST / Quick, Draw!
 
-A compact PyTorch implementation of the classic LeNet-5 convolutional network, plus a Tkinter GUI for drawing digits and testing a trained model.
+A compact PyTorch implementation of the classic LeNet-5 convolutional network, plus a local browser UI for drawing and testing a trained model.
 
 ## Setup
 
@@ -32,22 +32,24 @@ uv run python train.py --dataset quickdraw --epochs 5 --output checkpoints/lenet
 
 By default this uses 10,000 training drawings per class and all remaining drawings for testing. Use `--quickdraw-limit 0` to use every available training drawing. Quick, Draw! files are much larger than MNIST, so the first download may take a while.
 
-## Test with the GUI
+## Test with the web UI
 
 ```bash
-uv run python gui.py
+uv run python webui.py
 ```
+
+Open the printed local URL in a browser. By default it loads the MNIST checkpoint. Use another port with `--port 8080` if needed.
 
 Draw a white-on-black digit with the mouse, then click **Predict**. To use another checkpoint:
 
 ```bash
-uv run python gui.py --checkpoint path/to/model.pt
+uv run python webui.py --checkpoint path/to/model.pt
 ```
 
 For a Quick, Draw! checkpoint, use:
 
 ```bash
-uv run python gui.py --dataset quickdraw --checkpoint checkpoints/lenet_quickdraw.pt
+uv run python webui.py --dataset quickdraw --checkpoint checkpoints/lenet_quickdraw.pt
 ```
 
 The network is the classic 28x28 LeNet-5 layout: 1→6 convolution, average pooling, 6→16 convolution, average pooling, then fully connected layers 256→120→84→10.
