@@ -51,11 +51,13 @@ class QuickDrawDataset(Dataset):
         self.root.mkdir(parents=True, exist_ok=True)
         self.train = train
         self.transform = transform
-        self.examples: list[tuple[Path, int, int]] = []
+        self.arrays: list[np.ndarray] = []
+        self.examples: list[tuple[int, int]] = []
         for label, category in enumerate(QUICKDRAW_CLASSES):
             path = self.root / f"{category}.npy"
             try:
-                count = int(np.load(path, mmap_mode="r").shape[0])
+                array = np.load(path, mmap_mode="r")
+                count = int(array.shape[0])
             except (OSError, ValueError):
                 if path.exists():
                     path.unlink()
@@ -65,17 +67,19 @@ class QuickDrawDataset(Dataset):
                     urllib.request.urlretrieve(url, path)
                 except Exception as exc:
                     raise RuntimeError(f"Could not download {url}. Check your internet connection or download the .npy files manually into {self.root}/") from exc
-                count = int(np.load(path, mmap_mode="r").shape[0])
+                array = np.load(path, mmap_mode="r")
+                count = int(array.shape[0])
+            self.arrays.append(array)
             split = int(count * 0.9)
             start, end = (0, min(split, limit_per_class)) if train else (split, count)
-            self.examples.extend((path, label, index) for index in range(start, end))
+            self.examples.extend((label, index) for index in range(start, end))
 
     def __len__(self) -> int:
         return len(self.examples)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
-        path, label, row = self.examples[index]
-        pixels = np.load(path, mmap_mode="r")[row]
+        label, row = self.examples[index]
+        pixels = self.arrays[label][row]
         # Quick, Draw! numpy_bitmap files store each 28x28 image flattened
         # into 784 pixels.
         image = Image.fromarray(pixels.reshape(28, 28), mode="L")
@@ -89,6 +93,11 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _limit_worker_threads(_worker_id: int) -> None:
+    """Prevent each data-loader worker from spawning its own CPU thread pool."""
+    torch.set_num_threads(1)
 
 
 def make_loaders(dataset_name: str, data_dir: str, batch_size: int, workers: int, quickdraw_limit: int) -> tuple[DataLoader, DataLoader]:
@@ -109,9 +118,18 @@ def make_loaders(dataset_name: str, data_dir: str, batch_size: int, workers: int
     else:
         train_set = ResilientMNIST(data_dir, train=True, download=True, transform=train_transform)
         test_set = ResilientMNIST(data_dir, train=False, download=True, transform=test_transform)
+    loader_options = {
+        "batch_size": batch_size,
+        "num_workers": workers,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": workers > 0,
+        "worker_init_fn": _limit_worker_threads,
+    }
+    if workers > 0:
+        loader_options["prefetch_factor"] = 4
     return (
-        DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0),
-        DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0),
+        DataLoader(train_set, shuffle=True, **loader_options),
+        DataLoader(test_set, shuffle=False, **loader_options),
     )
 
 
@@ -151,7 +169,7 @@ def main() -> None:
     parser.add_argument("--data-dir", default="data", help="where MNIST is downloaded")
     parser.add_argument("--output", default="checkpoints/lenet_mnist.pt")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=2048, help="larger batches improve GPU utilization (default: 2048)")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--workers", type=int, default=None, help="data-loader worker processes (auto-capped for system resources)")
     parser.add_argument("--seed", type=int, default=42)
@@ -184,6 +202,7 @@ def main() -> None:
 
     print(f"Training on {device} ({len(train_loader.dataset):,} train / {len(test_loader.dataset):,} test images)")
     best_accuracy = 0.0
+    class_names = QUICKDRAW_CLASSES if args.dataset == "quickdraw" else tuple(str(i) for i in range(10))
     for epoch in range(1, args.epochs + 1):
         train_loss, train_accuracy = train_one_epoch(model, train_loader, loss_fn, optimizer, device)
         test_loss, test_accuracy = evaluate(model, test_loader, loss_fn, device)
@@ -193,7 +212,31 @@ def main() -> None:
             best_accuracy = test_accuracy
             output = Path(args.output)
             output.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"model_state_dict": model.state_dict(), "accuracy": test_accuracy, "epoch": epoch}, output)
+            torch.save({
+                "format_version": 2,
+                "model_state_dict": model.state_dict(),
+                "model_name": "LeNet-5",
+                "architecture": {
+                    "input_shape": [1, 28, 28],
+                    "layers": [
+                        {"type": "Conv2d", "in_channels": 1, "out_channels": 6, "kernel_size": 5, "activation": "Tanh"},
+                        {"type": "AvgPool2d", "kernel_size": 2, "stride": 2},
+                        {"type": "Conv2d", "in_channels": 6, "out_channels": 16, "kernel_size": 5, "activation": "Tanh"},
+                        {"type": "AvgPool2d", "kernel_size": 2, "stride": 2},
+                        {"type": "Linear", "in_features": 256, "out_features": 120, "activation": "Tanh"},
+                        {"type": "Linear", "in_features": 120, "out_features": 84, "activation": "Tanh"},
+                        {"type": "Linear", "in_features": 84, "out_features": 10, "activation": "None"},
+                    ],
+                },
+                "dataset": args.dataset,
+                "classes": list(class_names),
+                "normalization": {"mean": [0.1307], "std": [0.3081]},
+                "epoch": epoch,
+                "accuracy": test_accuracy,
+                "loss": test_loss,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+            }, output)
     print(f"Saved best checkpoint to {args.output} ({best_accuracy:.2%} test accuracy)")
 
 

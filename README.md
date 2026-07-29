@@ -18,7 +18,7 @@ MNIST is downloaded automatically into `data/` the first time. The trainer uses 
 uv run python train.py --epochs 5
 ```
 
-The best model is saved to `checkpoints/lenet_mnist.pt`. Use `--epochs`, `--batch-size`, `--lr`, or `--data-dir` to customize training. CUDA is selected automatically when available. PyTorch operations use all detected CPU cores; data-loader workers are automatically capped to avoid exhausting system file descriptors. Override with `--workers N` if needed.
+The best model is saved to `checkpoints/lenet_mnist.pt`. Each checkpoint contains the weights plus architecture metadata (layers, activations, pooling, input shape), class labels, normalization, optimizer/scheduler state, epoch, and metrics. Use `--epochs`, `--batch-size`, `--lr`, or `--data-dir` to customize training. CUDA is selected automatically when available. PyTorch operations use all detected CPU cores; data-loader workers are automatically capped to avoid exhausting system file descriptors. Override with `--workers N` if needed.
 
 Training applies random rotations up to ±10° and translations of up to 50% horizontally and vertically. Test images are not augmented.
 
