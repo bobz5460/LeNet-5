@@ -11,12 +11,15 @@ import torch
 from PIL import Image, ImageDraw
 
 from lenet import load_checkpoint
+from classes import QUICKDRAW_CLASSES
 
 
 class DigitApp:
     def __init__(self, root: tk.Tk, checkpoint: str, dataset: str) -> None:
         self.root = root
-        self.root.title(f"LeNet-5 · {dataset.title()} Digit Tester")
+        self.dataset = dataset
+        label = "Quick, Draw!" if dataset == "quickdraw" else "MNIST"
+        self.root.title(f"LeNet-5 · {label} Tester")
         self.root.configure(bg="#10151c")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         try:
@@ -75,8 +78,9 @@ class DigitApp:
         tensor = (tensor - 0.1307) / 0.3081
         with torch.no_grad():
             probabilities = self.model(tensor.unsqueeze(0).unsqueeze(0).to(self.device)).softmax(1)[0]
-        digit = int(probabilities.argmax())
-        self.result.set(f"Prediction: {digit}   ({probabilities[digit].item():.1%} confidence)")
+        prediction = int(probabilities.argmax())
+        label = QUICKDRAW_CLASSES[prediction] if self.dataset == "quickdraw" else str(prediction)
+        self.result.set(f"Prediction: {label}   ({probabilities[prediction].item():.1%} confidence)")
 
 
 def main() -> None:

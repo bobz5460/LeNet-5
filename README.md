@@ -5,49 +5,49 @@ A compact PyTorch implementation of the classic LeNet-5 convolutional network, p
 ## Setup
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 ```
+
+`uv` creates the environment and installs the dependencies. PyTorch uses CUDA automatically when a CUDA-capable installation and GPU are available; otherwise it falls back to the CPU.
 
 ## Train
 
 MNIST is downloaded automatically into `data/` the first time. The trainer uses a current fallback mirror because some torchvision versions still reference the retired Yann LeCun download URL:
 
 ```bash
-python train.py --epochs 5
+uv run python train.py --epochs 5
 ```
 
-The best model is saved to `checkpoints/lenet_mnist.pt`. Use `--epochs`, `--batch-size`, `--lr`, or `--data-dir` to customize training. CUDA is selected automatically when available.
+The best model is saved to `checkpoints/lenet_mnist.pt`. Use `--epochs`, `--batch-size`, `--lr`, or `--data-dir` to customize training. CUDA is selected automatically when available. Training uses all detected CPU cores by default for PyTorch operations and data loading; override this with `--workers N` if needed.
 
 Training applies random rotations up to ±10° and translations of up to 50% horizontally and vertically. Test images are not augmented.
 
-### Train on Quick, Draw! digits
+### Train on Quick, Draw! objects
 
-Quick, Draw! digit files are downloaded automatically into `data/quickdraw/`:
+Quick, Draw! files for airplane, apple, banana, bicycle, cat, dog, fish, flower, house, and star are downloaded automatically into `data/quickdraw/`:
 
 ```bash
-python train.py --dataset quickdraw --epochs 5 --output checkpoints/lenet_quickdraw.pt
+uv run python train.py --dataset quickdraw --epochs 5 --output checkpoints/lenet_quickdraw.pt
 ```
 
-By default this uses 10,000 training drawings per digit and all remaining drawings for testing. Use `--quickdraw-limit 0` to use every available training drawing. Quick, Draw! files are much larger than MNIST, so the first download may take a while.
+By default this uses 10,000 training drawings per class and all remaining drawings for testing. Use `--quickdraw-limit 0` to use every available training drawing. Quick, Draw! files are much larger than MNIST, so the first download may take a while.
 
 ## Test with the GUI
 
 ```bash
-python gui.py
+uv run python gui.py
 ```
 
 Draw a white-on-black digit with the mouse, then click **Predict**. To use another checkpoint:
 
 ```bash
-python gui.py --checkpoint path/to/model.pt
+uv run python gui.py --checkpoint path/to/model.pt
 ```
 
 For a Quick, Draw! checkpoint, use:
 
 ```bash
-python gui.py --dataset quickdraw --checkpoint checkpoints/lenet_quickdraw.pt
+uv run python gui.py --dataset quickdraw --checkpoint checkpoints/lenet_quickdraw.pt
 ```
 
 The network is the classic 28x28 LeNet-5 layout: 1→6 convolution, average pooling, 6→16 convolution, average pooling, then fully connected layers 256→120→84→10.

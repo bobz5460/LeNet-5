@@ -1,4 +1,4 @@
-"""Train and evaluate LeNet-5 on MNIST or Google's Quick, Draw! digits.
+"""Train and evaluate LeNet-5 on MNIST or Google's Quick, Draw! objects.
 
 Example: python train.py --epochs 5 --output checkpoints/lenet_mnist.pt
 """
@@ -6,6 +6,7 @@ Example: python train.py --epochs 5 --output checkpoints/lenet_mnist.pt
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import urllib.request
 from pathlib import Path
@@ -18,6 +19,7 @@ from PIL import Image
 from torchvision import datasets, transforms
 
 from lenet import LeNet5
+from classes import QUICKDRAW_CLASSES
 
 
 class ResilientMNIST(datasets.MNIST):
@@ -34,14 +36,14 @@ class ResilientMNIST(datasets.MNIST):
     ]
 
 
-class QuickDrawDigits(Dataset):
-    """The ten digit classes from Quick, Draw!'s 28x28 NumPy dataset.
+class QuickDrawDataset(Dataset):
+    """Ten object classes from Quick, Draw!'s 28x28 NumPy dataset.
 
     Quick, Draw! has no official train/test split, so each class is split
     deterministically into 90% training and 10% testing examples.
     """
 
-    base_url = "https://storage.googleapis.com/quickdraw_dataset/full/numpy/"
+    base_url = "https://storage.googleapis.com/quickdraw_dataset/full/numpy_bitmap/"
 
     def __init__(self, root: str, train: bool, transform=None, limit_per_class: int = 10_000) -> None:
         self.root = Path(root)
@@ -49,16 +51,20 @@ class QuickDrawDigits(Dataset):
         self.train = train
         self.transform = transform
         self.examples: list[tuple[Path, int, int]] = []
-        for label in range(10):
-            path = self.root / f"{label}.npy"
-            if not path.exists():
+        for label, category in enumerate(QUICKDRAW_CLASSES):
+            path = self.root / f"{category}.npy"
+            try:
+                count = int(np.load(path, mmap_mode="r").shape[0])
+            except (OSError, ValueError):
+                if path.exists():
+                    path.unlink()
                 url = self.base_url + path.name
-                print(f"Downloading Quick, Draw! class {label} from {url}")
+                print(f"Downloading Quick, Draw! class {category} from {url}")
                 try:
                     urllib.request.urlretrieve(url, path)
                 except Exception as exc:
                     raise RuntimeError(f"Could not download {url}. Check your internet connection or download the .npy files manually into {self.root}/") from exc
-            count = int(np.load(path, mmap_mode="r").shape[0])
+                count = int(np.load(path, mmap_mode="r").shape[0])
             split = int(count * 0.9)
             start, end = (0, min(split, limit_per_class)) if train else (split, count)
             self.examples.extend((path, label, index) for index in range(start, end))
@@ -68,7 +74,10 @@ class QuickDrawDigits(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         path, label, row = self.examples[index]
-        image = Image.fromarray(np.load(path, mmap_mode="r")[row], mode="L")
+        pixels = np.load(path, mmap_mode="r")[row]
+        # Quick, Draw! numpy_bitmap files store each 28x28 image flattened
+        # into 784 pixels.
+        image = Image.fromarray(pixels.reshape(28, 28), mode="L")
         if self.transform is not None:
             image = self.transform(image)
         return image, label
@@ -94,14 +103,14 @@ def make_loaders(dataset_name: str, data_dir: str, batch_size: int, workers: int
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
     if dataset_name == "quickdraw":
-        train_set = QuickDrawDigits(Path(data_dir) / "quickdraw", train=True, transform=train_transform, limit_per_class=quickdraw_limit)
-        test_set = QuickDrawDigits(Path(data_dir) / "quickdraw", train=False, transform=test_transform, limit_per_class=quickdraw_limit)
+        train_set = QuickDrawDataset(Path(data_dir) / "quickdraw", train=True, transform=train_transform, limit_per_class=quickdraw_limit)
+        test_set = QuickDrawDataset(Path(data_dir) / "quickdraw", train=False, transform=test_transform, limit_per_class=quickdraw_limit)
     else:
         train_set = ResilientMNIST(data_dir, train=True, download=True, transform=train_transform)
         test_set = ResilientMNIST(data_dir, train=False, download=True, transform=test_transform)
     return (
-        DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True),
-        DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True),
+        DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0),
+        DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0),
     )
 
 
@@ -109,7 +118,8 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, loss_fn: nn.Module, op
     model.train()
     total_loss = total_correct = total_items = 0
     for images, labels in loader:
-        images, labels = images.to(device), labels.to(device)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         logits = model(images)
         loss = loss_fn(logits, labels)
@@ -126,8 +136,8 @@ def evaluate(model: nn.Module, loader: DataLoader, loss_fn: nn.Module, device: t
     model.eval()
     total_loss = total_correct = total_items = 0
     for images, labels in loader:
-        logits = model(images.to(device))
-        labels = labels.to(device)
+        logits = model(images.to(device, non_blocking=True))
+        labels = labels.to(device, non_blocking=True)
         total_loss += loss_fn(logits, labels).item() * labels.size(0)
         total_correct += (logits.argmax(1) == labels).sum().item()
         total_items += labels.size(0)
@@ -135,20 +145,26 @@ def evaluate(model: nn.Module, loader: DataLoader, loss_fn: nn.Module, device: t
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train LeNet-5 on MNIST or Quick, Draw! digits")
+    parser = argparse.ArgumentParser(description="Train LeNet-5 on MNIST or Quick, Draw! objects")
     parser.add_argument("--dataset", choices=("mnist", "quickdraw"), default="mnist")
     parser.add_argument("--data-dir", default="data", help="where MNIST is downloaded")
     parser.add_argument("--output", default="checkpoints/lenet_mnist.pt")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="data-loader worker processes (defaults to all CPU cores)")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--quickdraw-limit", type=int, default=10_000, help="training examples per digit for Quick, Draw! (0 = all)")
+    parser.add_argument("--quickdraw-limit", type=int, default=10_000, help="training examples per class for Quick, Draw! (0 = all)")
     args = parser.parse_args()
 
+    cpu_cores = os.cpu_count() or 1
+    torch.set_num_threads(cpu_cores)
+    torch.set_num_interop_threads(min(cpu_cores, 4))
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        print(f"CUDA enabled: {torch.cuda.get_device_name(0)}")
     quickdraw_limit = args.quickdraw_limit or 10**9
     train_loader, test_loader = make_loaders(args.dataset, args.data_dir, args.batch_size, args.workers, quickdraw_limit)
     model = LeNet5().to(device)
