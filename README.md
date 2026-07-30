@@ -25,6 +25,16 @@ python3 train.py mnist --output-dir exports/mnist --epochs 10
 python3 train.py nist19 --nist-root /path/to/by_class --output-dir exports/nist19 --epochs 20
 ```
 
+## Faster training
+
+The trainer uses CUDA mixed precision, pinned memory, persistent data-loader workers, prefetching, cuDNN tuning, and TF32 automatically when CUDA is available. For a long GPU run, start with:
+
+```bash
+python3 train.py nist19 --nist-root data/nist19/by_class --output-dir exports/nist19 --device cuda --batch-size 512 --workers 8 --compile
+```
+
+Lower `--batch-size` if CUDA runs out of memory. `--workers 8` matches this machine's eight logical CPUs; tune it downward if disk contention makes it slower. LeNet-5 is deliberately very small, so a modern GPU may still appear lightly utilized even at maximum useful throughput.
+
 MNIST downloads automatically to `data/`. For NIST SD19 v1, unpack its `by_class` tree first. Image folders can be letters (`A`), decimal ASCII codes (`65`), or hexadecimal ASCII codes (`41`), as in the NIST distribution. Only A–Z are used.
 
 ## Web UI
