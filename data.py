@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import string
 
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
@@ -9,6 +10,7 @@ from torchvision import datasets, transforms
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+EMNIST_BYCLASS_CLASSES = tuple(string.digits + string.ascii_uppercase + string.ascii_lowercase)
 
 
 def preprocessing_metadata() -> dict:
@@ -24,6 +26,17 @@ def image_transform():
     return transforms.Compose([transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
 
 
+def emnist_transform():
+    """Correct EMNIST's stored orientation, then use the shared 32×32 pipeline."""
+    return transforms.Compose([
+        transforms.Lambda(lambda image: image.transpose(Image.Transpose.TRANSPOSE).transpose(Image.Transpose.FLIP_LEFT_RIGHT)),
+        transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR),
+        transforms.Pad(2, fill=0),
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+    ])
+
+
 def nist_transform():
     """NIST scans are dark ink on a light page; invert to MNIST polarity."""
     return transforms.Compose([transforms.Lambda(ImageOps.invert), transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
@@ -32,6 +45,22 @@ def nist_transform():
 def mnist_datasets(root: str | Path):
     transform = image_transform()
     return datasets.MNIST(str(root), train=True, download=True, transform=transform), datasets.MNIST(str(root), train=False, download=True, transform=transform)
+
+
+def emnist_byclass_datasets(root: str | Path):
+    """EMNIST ByClass: 814,255 handwritten digits and upper/lower-case letters."""
+    transform = emnist_transform()
+    return (
+        datasets.EMNIST(str(root), split="byclass", train=True, download=True, transform=transform),
+        datasets.EMNIST(str(root), split="byclass", train=False, download=True, transform=transform),
+    )
+
+
+def emnist_preprocessing_metadata() -> dict:
+    metadata = preprocessing_metadata()
+    metadata["operations"].insert(0, {"op": "flip_horizontal", "reason": "correct EMNIST storage orientation"})
+    metadata["operations"].insert(0, {"op": "transpose", "reason": "correct EMNIST storage orientation"})
+    return metadata
 
 
 def _letter_from_path(path: Path, root: Path) -> str | None:

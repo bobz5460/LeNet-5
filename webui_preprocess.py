@@ -11,6 +11,8 @@ def preprocess(image: Image.Image, metadata: dict) -> tuple[torch.Tensor, Image.
     for operation in metadata["operations"]:
         op = operation["op"]
         if op == "invert": result = ImageOps.invert(result)
+        elif op == "transpose": result = result.transpose(Image.Transpose.TRANSPOSE)
+        elif op == "flip_horizontal": result = result.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         elif op == "resize": result = result.resize(tuple(operation["size"]), Image.Resampling.BILINEAR)
         elif op == "pad": result = ImageOps.expand(result, border=(operation["left"], operation["top"], operation["right"], operation["bottom"]), fill=operation["fill"])
         elif op == "to_tensor": continue
