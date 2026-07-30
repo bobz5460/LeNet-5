@@ -11,6 +11,7 @@ ARCHITECTURE_VERSION = "lenet5-tanh-32x32-v1"
 LARGE_ARCHITECTURE_VERSION = "lenet-large-tanh-32x32-v1"
 MAX_ARCHITECTURE_VERSION = "lenet-max-tanh-32x32-v1"
 CONFIGURABLE_ARCHITECTURE_VERSION = "lenet-configurable-32x32-v2"
+REGULARIZED_ARCHITECTURE_VERSION = "lenet-configurable-32x32-v3"
 
 ACTIVATIONS = ("tanh", "relu", "gelu", "sigmoid", "leaky_relu", "elu", "silu")
 POOLINGS = ("avg", "max")
@@ -31,6 +32,8 @@ class LeNetConfig:
     activation: str = "tanh"
     pooling: str = "avg"
     leaky_relu_slope: float = 0.01
+    batch_norm: bool = False
+    dropout: float = 0.0
 
     def __post_init__(self) -> None:
         if self.preset not in MODEL_PRESETS:
@@ -43,6 +46,8 @@ class LeNetConfig:
             raise ValueError(f"Unsupported activation: {self.activation}")
         if self.pooling not in POOLINGS:
             raise ValueError(f"Unsupported pooling: {self.pooling}")
+        if not 0 <= self.dropout < 1:
+            raise ValueError("dropout must be in [0, 1)")
 
     def export(self) -> dict[str, Any]:
         result = asdict(self)
@@ -50,9 +55,9 @@ class LeNetConfig:
         return result
 
 
-def make_config(preset: str, *, activation: str = "tanh", pooling: str = "avg", channels: tuple[int, int, int] | None = None, hidden_dim: int | None = None, leaky_relu_slope: float = 0.01) -> LeNetConfig:
+def make_config(preset: str, *, activation: str = "tanh", pooling: str = "avg", channels: tuple[int, int, int] | None = None, hidden_dim: int | None = None, leaky_relu_slope: float = 0.01, batch_norm: bool = False, dropout: float = 0.0) -> LeNetConfig:
     default_channels, default_hidden = MODEL_PRESETS[preset]
-    return LeNetConfig(preset, channels or default_channels, hidden_dim or default_hidden, activation, pooling, leaky_relu_slope)
+    return LeNetConfig(preset, channels or default_channels, hidden_dim or default_hidden, activation, pooling, leaky_relu_slope, batch_norm, dropout)
 
 
 def activation_layer(config: LeNetConfig) -> nn.Module:
@@ -74,12 +79,23 @@ class ConfigurableLeNet(nn.Module):
         super().__init__()
         self.num_classes, self.config = num_classes, config
         c1, c2, c3 = config.channels
-        self.features = nn.Sequential(
-            nn.Conv2d(1, c1, kernel_size=5), activation_layer(config), pooling_layer(config),
-            nn.Conv2d(c1, c2, kernel_size=5), activation_layer(config), pooling_layer(config),
-            nn.Conv2d(c2, c3, kernel_size=5), activation_layer(config),
-        )
-        self.classifier = nn.Sequential(nn.Flatten(), nn.Linear(c3, config.hidden_dim), activation_layer(config), nn.Linear(config.hidden_dim, num_classes))
+        # With batch_norm/dropout disabled this is byte-for-byte the original preset topology.
+        features: list[nn.Module] = []
+        for in_channels, out_channels, pool in ((1, c1, True), (c1, c2, True), (c2, c3, False)):
+            features.append(nn.Conv2d(in_channels, out_channels, kernel_size=5))
+            if config.batch_norm:
+                features.append(nn.BatchNorm2d(out_channels))
+            features.append(activation_layer(config))
+            if pool:
+                features.append(pooling_layer(config))
+        classifier: list[nn.Module] = [nn.Flatten(), nn.Linear(c3, config.hidden_dim)]
+        if config.batch_norm:
+            classifier.append(nn.BatchNorm1d(config.hidden_dim))
+        classifier.append(activation_layer(config))
+        if config.dropout:
+            classifier.append(nn.Dropout(config.dropout))
+        classifier.append(nn.Linear(config.hidden_dim, num_classes))
+        self.features, self.classifier = nn.Sequential(*features), nn.Sequential(*classifier)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.features(x))
@@ -106,7 +122,7 @@ def _architecture_id(config: LeNetConfig) -> str:
     defaults = make_config(config.preset)
     if config == defaults:
         return {"lenet5": ARCHITECTURE_VERSION, "large": LARGE_ARCHITECTURE_VERSION, "max": MAX_ARCHITECTURE_VERSION}[config.preset]
-    return CONFIGURABLE_ARCHITECTURE_VERSION
+    return REGULARIZED_ARCHITECTURE_VERSION if config.batch_norm or config.dropout else CONFIGURABLE_ARCHITECTURE_VERSION
 
 
 def architecture_metadata(num_classes: int, variant: str = "lenet5", config: LeNetConfig | None = None) -> dict[str, Any]:
@@ -114,24 +130,38 @@ def architecture_metadata(num_classes: int, variant: str = "lenet5", config: LeN
     config = config or make_config(variant)
     c1, c2, c3 = config.channels
     conv = lambda name, ic, oc: {"name": name, "op": "conv2d", "weight_key": f"{name}.weight", "bias_key": f"{name}.bias", "weight_layout": "OIHW", "in_channels": ic, "out_channels": oc, "kernel": [5, 5], "stride": [1, 1], "padding": [0, 0], "dilation": [1, 1], "groups": 1}
+    batch_norm = lambda name, features: {"name": name, "op": "batch_norm2d" if name.startswith("features") else "batch_norm1d", "weight_key": f"{name}.weight", "bias_key": f"{name}.bias", "running_mean_key": f"{name}.running_mean", "running_var_key": f"{name}.running_var", "num_features": features, "eps": 1e-5, "momentum": 0.1}
     activation = {"name": "", "op": config.activation}
     if config.activation == "leaky_relu": activation["negative_slope"] = config.leaky_relu_slope
     pool_op = "avg_pool2d" if config.pooling == "avg" else "max_pool2d"
     pool = lambda name: {"name": name, "op": pool_op, "kernel": [2, 2], "stride": [2, 2], "padding": [0, 0], "ceil_mode": False, **({"count_include_pad": True} if config.pooling == "avg" else {})}
     def act(name: str) -> dict[str, Any]: return {**activation, "name": name}
+    layers: list[dict[str, Any]] = []
+    feature_index = 0
+    for in_channels, out_channels, has_pool in ((1, c1, True), (c1, c2, True), (c2, c3, False)):
+        name = f"features.{feature_index}"; layers.append(conv(name, in_channels, out_channels)); feature_index += 1
+        if config.batch_norm:
+            layers.append(batch_norm(f"features.{feature_index}", out_channels)); feature_index += 1
+        layers.append(act(f"features.{feature_index}")); feature_index += 1
+        if has_pool:
+            layers.append(pool(f"features.{feature_index}")); feature_index += 1
+    classifier_index = 0
+    layers.extend([
+        {"name": f"classifier.{classifier_index}", "op": "flatten", "start_dim": 1, "end_dim": -1},
+        {"name": f"classifier.{classifier_index + 1}", "op": "linear", "weight_key": f"classifier.{classifier_index + 1}.weight", "bias_key": f"classifier.{classifier_index + 1}.bias", "weight_layout": "OI", "in_features": c3, "out_features": config.hidden_dim},
+    ])
+    classifier_index += 2
+    if config.batch_norm:
+        layers.append(batch_norm(f"classifier.{classifier_index}", config.hidden_dim)); classifier_index += 1
+    layers.append(act(f"classifier.{classifier_index}")); classifier_index += 1
+    if config.dropout:
+        layers.append({"name": f"classifier.{classifier_index}", "op": "dropout", "p": config.dropout, "inference_behavior": "identity"}); classifier_index += 1
+    layers.append({"name": f"classifier.{classifier_index}", "op": "linear", "weight_key": f"classifier.{classifier_index}.weight", "bias_key": f"classifier.{classifier_index}.bias", "weight_layout": "OI", "in_features": config.hidden_dim, "out_features": num_classes})
     return {
         "id": _architecture_id(config), "config": config.export(),
         "input": {"layout": "NCHW", "dtype": "float32", "shape": [1, 1, 32, 32]},
         "convolution_semantics": "cross_correlation",
-        "layers": [
-            conv("features.0", 1, c1), act("features.1"), pool("features.2"),
-            conv("features.3", c1, c2), act("features.4"), pool("features.5"),
-            conv("features.6", c2, c3), act("features.7"),
-            {"name": "classifier.0", "op": "flatten", "start_dim": 1, "end_dim": -1},
-            {"name": "classifier.1", "op": "linear", "weight_key": "classifier.1.weight", "bias_key": "classifier.1.bias", "weight_layout": "OI", "in_features": c3, "out_features": config.hidden_dim},
-            act("classifier.2"),
-            {"name": "classifier.3", "op": "linear", "weight_key": "classifier.3.weight", "bias_key": "classifier.3.bias", "weight_layout": "OI", "in_features": config.hidden_dim, "out_features": num_classes},
-        ],
+        "layers": layers,
         "output": {"type": "logits", "shape": [1, num_classes], "postprocess": "softmax over class dimension for probabilities"},
     }
 

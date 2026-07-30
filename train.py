@@ -1,32 +1,35 @@
-"""Train and export a LeNet-5 model for MNIST or NIST SD19 letters."""
+"""Train and export configurable LeNet-family handwriting classifiers."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import random
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler, random_split
 
-from data import EMNIST_BYCLASS_CLASSES, LETTERS, NIST19Letters, emnist_byclass_datasets, emnist_preprocessing_metadata, mnist_datasets, preprocessing_metadata
+from data import (EMNIST_BYCLASS_CLASSES, LETTERS, MNIST_NORMALIZATION, NIST19Letters,
+                  emnist_byclass_datasets, emnist_preprocessing_metadata, emnist_transform,
+                  image_transform, mnist_datasets, nist_transform, preprocessing_metadata)
 from export_model import build_bundle, save_bundle
 from lenet5 import ACTIVATIONS, POOLINGS, MODEL_PRESETS, ConfigurableLeNet, make_config
 
 
-def evaluate(model, loader, device, non_blocking, amp_enabled):
-    model.eval(); correct = total = 0
+def evaluate(model, loader, device, non_blocking, amp_enabled, num_classes):
+    model.eval(); correct = total = 0; confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=non_blocking)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp_enabled): prediction = model(x).argmax(1).cpu()
             correct += (prediction == y).sum().item(); total += y.numel()
-    return correct / total
+            confusion += torch.bincount(y * num_classes + prediction, minlength=num_classes ** 2).reshape(num_classes, num_classes)
+    return correct / total, confusion
 
 
 def cache_on_device(dataset, device, workers, stage_batch_size):
-    """Transform once and retain samples on a large CUDA GPU for later epochs."""
     print(f"Caching {len(dataset):,} samples on {device}…")
     loader = DataLoader(dataset, stage_batch_size, num_workers=workers, pin_memory=True,
                         persistent_workers=workers > 0, prefetch_factor=4 if workers > 0 else None)
@@ -36,91 +39,161 @@ def cache_on_device(dataset, device, workers, stage_batch_size):
     return torch.cat(images), torch.cat(labels)
 
 
-def evaluate_cached(model, images, labels, batch_size, amp_enabled):
-    model.eval(); correct = 0
+def evaluate_cached(model, images, labels, batch_size, amp_enabled, num_classes):
+    model.eval(); correct = 0; confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
     with torch.no_grad():
         for start in range(0, len(labels), batch_size):
             x, y = images[start:start + batch_size], labels[start:start + batch_size]
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp_enabled): correct += (model(x).argmax(1) == y).sum().item()
-    return correct / len(labels)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp_enabled): prediction = model(x).argmax(1)
+            correct += (prediction == y).sum().item()
+            confusion += torch.bincount((y * num_classes + prediction).cpu(), minlength=num_classes ** 2).reshape(num_classes, num_classes)
+    return correct / len(labels), confusion
+
+
+class TransformedNISTSubset(Dataset):
+    """A split with its own transform; random_split otherwise shares one dataset transform."""
+    def __init__(self, dataset: NIST19Letters, indices, transform):
+        self.dataset, self.indices, self.transform = dataset, list(indices), transform
+        self.targets = [dataset.samples[index][1] for index in self.indices]
+
+    def __len__(self): return len(self.indices)
+
+    def __getitem__(self, index):
+        image, target = self.dataset.raw_item(self.indices[index])
+        return self.transform(image), target
+
+
+def set_transform(dataset: Dataset, transform) -> None:
+    """Set a transform through a Subset without changing its samples or split."""
+    while isinstance(dataset, Subset):
+        dataset = dataset.dataset
+    dataset.transform = transform
+
+
+def labels_for(dataset: Dataset) -> torch.Tensor:
+    while isinstance(dataset, Subset):
+        return labels_for(dataset.dataset)[torch.as_tensor(dataset.indices)]
+    if hasattr(dataset, "targets"):
+        return torch.as_tensor(dataset.targets, dtype=torch.long)
+    if hasattr(dataset, "samples"):
+        return torch.tensor([target for _, target in dataset.samples], dtype=torch.long)
+    raise TypeError("dataset does not expose labels required for class balancing")
+
+
+def normalization_stats(dataset: Dataset, workers: int, batch_size: int) -> tuple[float, float]:
+    """Compute pixel-weighted statistics after resize/pad, using training data only."""
+    print("Computing training-set normalization statistics…")
+    loader = DataLoader(dataset, batch_size, num_workers=workers, pin_memory=False,
+                        persistent_workers=workers > 0, prefetch_factor=2 if workers > 0 else None)
+    pixel_sum = pixel_square_sum = 0.0; count = 0
+    for images, _ in loader:
+        pixel_sum += images.sum().item(); pixel_square_sum += images.square().sum().item(); count += images.numel()
+    mean = pixel_sum / count
+    return mean, max(pixel_square_sum / count - mean * mean, 1e-12) ** 0.5
+
+
+def augmentation_options(args) -> dict:
+    return {"augment": args.augment, "rotation_degrees": args.rotation_degrees,
+            "translate": args.translate, "scale_min": args.scale_min,
+            "scale_max": args.scale_max, "shear_degrees": args.shear_degrees}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", choices=("mnist", "nist19", "emnist-byclass")); parser.add_argument("--data-root", default="data")
-    parser.add_argument("--model", choices=tuple(MODEL_PRESETS), default=None, help="Network preset; emnist-byclass defaults to large")
-    parser.add_argument("--activation", choices=ACTIVATIONS, default="tanh", help="Nonlinearity after each convolution and hidden layer")
-    parser.add_argument("--pooling", choices=POOLINGS, default="avg", help="Pooling method after the first two convolutions")
-    parser.add_argument("--channels", help="Override convolution widths as c1,c2,c3 (for example: 24,72,288)")
-    parser.add_argument("--hidden-dim", type=int, help="Override hidden-layer width")
-    parser.add_argument("--leaky-relu-slope", type=float, default=0.01, help="Negative slope when --activation leaky_relu")
+    parser.add_argument("--model", choices=tuple(MODEL_PRESETS), default=None, help="Network preset; EMNIST defaults to large")
+    parser.add_argument("--activation", choices=ACTIVATIONS, default="tanh"); parser.add_argument("--pooling", choices=POOLINGS, default="avg")
+    parser.add_argument("--channels"); parser.add_argument("--hidden-dim", type=int); parser.add_argument("--leaky-relu-slope", type=float, default=0.01)
+    parser.add_argument("--batch-norm", action=argparse.BooleanOptionalAction, default=False, help="Insert BatchNorm after conv/hidden layers")
+    parser.add_argument("--dropout", type=float, default=0.0, help="Classifier dropout probability (0 preserves LeNet)")
     parser.add_argument("--nist-root", type=Path); parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--epochs", type=int, default=10); parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--learning-rate", type=float, default=1e-3); parser.add_argument("--val-fraction", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42); parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1), help="DataLoader worker processes (default: 4 or CPU count)")
-    parser.add_argument("--prefetch-factor", type=int, default=4, help="Batches each worker keeps ready")
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="Use CUDA mixed precision when available")
-    parser.add_argument("--compile", action="store_true", help="Use torch.compile (beneficial mainly for longer runs)")
-    parser.add_argument("--cpu-threads", type=int, default=0, help="PyTorch CPU compute threads; 0 leaves PyTorch default")
-    parser.add_argument("--cache-dataset", choices=("none", "cuda"), default="none", help="Cache transformed dataset on a CUDA GPU; ideal for SD19 on a 48 GB L40S")
+    parser.add_argument("--optimizer", choices=("adam", "adamw"), default="adamw"); parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4); parser.add_argument("--label-smoothing", type=float, default=0.0)
+    parser.add_argument("--scheduler", choices=("none", "cosine", "plateau"), default="cosine"); parser.add_argument("--min-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--plateau-patience", type=int, default=5); parser.add_argument("--plateau-factor", type=float, default=0.5)
+    parser.add_argument("--class-balancing", choices=("none", "loss", "sampler"), default=None); parser.add_argument("--class-weight-power", type=float, default=1.0)
+    parser.add_argument("--normalization", choices=("mnist", "dataset"), default="dataset", help="MNIST constants or statistics computed from this training split")
+    parser.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True); parser.add_argument("--rotation-degrees", type=float, default=12)
+    parser.add_argument("--translate", type=float, default=0.1); parser.add_argument("--scale-min", type=float, default=0.9); parser.add_argument("--scale-max", type=float, default=1.1); parser.add_argument("--shear-degrees", type=float, default=10)
+    parser.add_argument("--report-confusion-matrix", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--val-fraction", type=float, default=0.1); parser.add_argument("--seed", type=int, default=42); parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1)); parser.add_argument("--prefetch-factor", type=int, default=4)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True); parser.add_argument("--compile", action="store_true"); parser.add_argument("--cpu-threads", type=int, default=0)
+    parser.add_argument("--cache-dataset", choices=("none", "cuda"), default="none")
     args = parser.parse_args(); torch.manual_seed(args.seed); random.seed(args.seed)
+    if not 0 <= args.label_smoothing < 1: parser.error("--label-smoothing must be in [0, 1)")
+    if args.weight_decay < 0 or args.class_weight_power < 0: parser.error("weight decay and class-weight power must be non-negative")
     if args.cpu_threads > 0: torch.set_num_threads(args.cpu_threads)
     cuda = args.device.startswith("cuda")
     if cuda and not torch.cuda.is_available(): parser.error("--device cuda was requested, but CUDA is unavailable to PyTorch")
-    if cuda:
-        torch.backends.cudnn.benchmark = True
-        torch.set_float32_matmul_precision("high")
+    if cuda: torch.backends.cudnn.benchmark = True; torch.set_float32_matmul_precision("high")
     elif args.cache_dataset == "cuda": parser.error("--cache-dataset cuda requires --device cuda")
+    # Initially omit normalization so the optional statistics pass sees [0, 1] pixels.
+    raw_options = {"mean": 0.0, "std": 1.0}
     if args.dataset == "mnist":
-        train_set, val_set = mnist_datasets(args.data_root); classes = [str(i) for i in range(10)]; prep = preprocessing_metadata()
+        train_set, val_set = mnist_datasets(args.data_root, **raw_options); classes = [str(i) for i in range(10)]; transform_factory = image_transform
     elif args.dataset == "emnist-byclass":
-        train_set, val_set = emnist_byclass_datasets(args.data_root); classes = list(EMNIST_BYCLASS_CLASSES); prep = emnist_preprocessing_metadata()
+        train_set, val_set = emnist_byclass_datasets(args.data_root, **raw_options); classes = list(EMNIST_BYCLASS_CLASSES); transform_factory = emnist_transform
     else:
         if args.nist_root is None: parser.error("nist19 requires --nist-root")
-        full = NIST19Letters(args.nist_root); n_val = max(1, round(len(full) * args.val_fraction)); train_set, val_set = random_split(full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(args.seed))
-        classes = list(LETTERS); prep = preprocessing_metadata(); prep["operations"].insert(0, {"op": "invert", "reason": "NIST dark-ink scan to MNIST-style bright foreground"})
+        full = NIST19Letters(args.nist_root); n_val = max(1, round(len(full) * args.val_fraction)); train_split, val_split = random_split(full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(args.seed)); train_set = TransformedNISTSubset(full, train_split.indices, nist_transform(**raw_options)); val_set = TransformedNISTSubset(full, val_split.indices, nist_transform(**raw_options)); classes = list(LETTERS); transform_factory = nist_transform
+    mean, std = MNIST_NORMALIZATION if args.normalization == "mnist" else normalization_stats(train_set, args.workers, min(args.batch_size, 2048))
+    common_transform = {"mean": mean, "std": std}
+    set_transform(train_set, transform_factory(**common_transform, **augmentation_options(args)))
+    set_transform(val_set, transform_factory(**common_transform))
+    prep = emnist_preprocessing_metadata(mean, std) if args.dataset == "emnist-byclass" else preprocessing_metadata(mean, std)
+    if args.dataset == "nist19": prep["operations"].insert(0, {"op": "invert", "reason": "NIST dark-ink scan to MNIST-style bright foreground"})
+    balance = args.class_balancing if args.class_balancing is not None else ("loss" if args.dataset == "emnist-byclass" else "none")
+    train_labels_cpu = labels_for(train_set); counts = torch.bincount(train_labels_cpu, minlength=len(classes)).float()
+    class_weights = (counts.sum() / (len(classes) * counts)).pow(args.class_weight_power) if balance != "none" else None
+    sample_weights = class_weights[train_labels_cpu] if balance == "sampler" else None
     cached = args.cache_dataset == "cuda"
     if cached:
-        # A moderate staging batch avoids worker/disk contention. Subsequent epochs use no DataLoader.
-        train_images, train_labels = cache_on_device(train_set, args.device, min(args.workers, 8), min(args.batch_size, 4096))
-        val_images, val_labels = cache_on_device(val_set, args.device, min(args.workers, 8), min(args.batch_size, 4096))
+        train_images, train_labels = cache_on_device(train_set, args.device, min(args.workers, 8), min(args.batch_size, 4096)); val_images, val_labels = cache_on_device(val_set, args.device, min(args.workers, 8), min(args.batch_size, 4096))
     else:
         loader_args = {"num_workers": args.workers, "pin_memory": cuda}
         if args.workers > 0: loader_args.update({"persistent_workers": True, "prefetch_factor": args.prefetch_factor})
-        train_loader = DataLoader(train_set, args.batch_size, shuffle=True, **loader_args)
-        val_loader = DataLoader(val_set, args.batch_size, **loader_args)
+        sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True, generator=torch.Generator().manual_seed(args.seed)) if sample_weights is not None else None
+        train_loader = DataLoader(train_set, args.batch_size, shuffle=sampler is None, sampler=sampler, **loader_args); val_loader = DataLoader(val_set, args.batch_size, **loader_args)
     model_name = args.model or ("large" if args.dataset == "emnist-byclass" else "lenet5")
     try:
         channels = tuple(int(value) for value in args.channels.split(",")) if args.channels else None
         if channels is not None and len(channels) != 3: raise ValueError
-    except ValueError:
-        parser.error("--channels must be three comma-separated positive integers, e.g. 24,72,288")
-    try:
-        config = make_config(model_name, activation=args.activation, pooling=args.pooling, channels=channels, hidden_dim=args.hidden_dim, leaky_relu_slope=args.leaky_relu_slope)
-    except ValueError as error:
-        parser.error(str(error))
+    except ValueError: parser.error("--channels must be three comma-separated positive integers, e.g. 24,72,288")
+    try: config = make_config(model_name, activation=args.activation, pooling=args.pooling, channels=channels, hidden_dim=args.hidden_dim, leaky_relu_slope=args.leaky_relu_slope, batch_norm=args.batch_norm, dropout=args.dropout)
+    except ValueError as error: parser.error(str(error))
     model = ConfigurableLeNet(len(classes), config).to(args.device)
     if args.compile: model = torch.compile(model)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate); loss_fn = nn.CrossEntropyLoss(); scaler = torch.cuda.amp.GradScaler(enabled=cuda and args.amp); best_state, best_accuracy = None, -1.0
+    optimizer = (torch.optim.AdamW if args.optimizer == "adamw" else torch.optim.Adam)(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights.to(args.device) if balance == "loss" else None, label_smoothing=args.label_smoothing)
+    scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=args.min_learning_rate) if args.scheduler == "cosine" else torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=args.plateau_factor, patience=args.plateau_patience, min_lr=args.min_learning_rate) if args.scheduler == "plateau" else None)
+    scaler = torch.cuda.amp.GradScaler(enabled=cuda and args.amp); best_state, best_accuracy = None, -1.0
     for epoch in range(1, args.epochs + 1):
         model.train(); total_loss = total = 0
-        batches = ((train_images[index], train_labels[index]) for index in torch.randperm(len(train_labels), device=args.device).split(args.batch_size)) if cached else ((x.to(args.device, non_blocking=cuda), y.to(args.device, non_blocking=cuda)) for x, y in train_loader)
+        if cached:
+            indices = torch.multinomial(sample_weights.to(args.device), len(train_labels), replacement=True) if sample_weights is not None else torch.randperm(len(train_labels), device=args.device)
+            batches = ((train_images[index], train_labels[index]) for index in indices.split(args.batch_size))
+        else: batches = ((x.to(args.device, non_blocking=cuda), y.to(args.device, non_blocking=cuda)) for x, y in train_loader)
         for x, y in batches:
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=cuda and args.amp): loss = loss_fn(model(x), y)
-            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
-            total_loss += loss.item() * y.size(0); total += y.size(0)
-        accuracy = evaluate_cached(model, val_images, val_labels, args.batch_size, cuda and args.amp) if cached else evaluate(model, val_loader, args.device, cuda, cuda and args.amp); print(f"epoch {epoch:03d}/{args.epochs}: loss={total_loss/total:.4f}, validation_accuracy={accuracy:.2%}")
+            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update(); total_loss += loss.item() * y.size(0); total += y.size(0)
+        accuracy, _ = evaluate_cached(model, val_images, val_labels, args.batch_size, cuda and args.amp, len(classes)) if cached else evaluate(model, val_loader, args.device, cuda, cuda and args.amp, len(classes))
+        if scheduler: scheduler.step(accuracy) if args.scheduler == "plateau" else scheduler.step()
+        print(f"epoch {epoch:03d}/{args.epochs}: loss={total_loss/total:.4f}, validation_accuracy={accuracy:.2%}, learning_rate={optimizer.param_groups[0]['lr']:.2e}")
         if accuracy > best_accuracy:
-            best_accuracy = accuracy
-            state_model = model._orig_mod if args.compile else model
-            best_state = {k: v.detach().cpu().clone() for k, v in state_model.state_dict().items()}
+            best_accuracy = accuracy; state_model = model._orig_mod if args.compile else model; best_state = {k: v.detach().cpu().clone() for k, v in state_model.state_dict().items()}
     if args.compile: model = model._orig_mod
     model.load_state_dict(best_state)
-    training = {"epochs": args.epochs, "optimizer": "Adam", "learning_rate": args.learning_rate, "seed": args.seed, "best_validation_accuracy": best_accuracy, "batch_size": args.batch_size, "workers": args.workers, "amp": cuda and args.amp, "dataset_cached_on_cuda": cached, "model": model_name, "model_config": config.export()}
-    model_tag = f"lenet_{model_name}" if model_name != "lenet5" else "lenet5"
-    model_path, json_path = save_bundle(build_bundle(model, args.dataset, classes, prep, training), args.output_dir / f"{model_tag}_{args.dataset}.pt")
+    final_accuracy, confusion = evaluate_cached(model, val_images, val_labels, args.batch_size, cuda and args.amp, len(classes)) if cached else evaluate(model, val_loader, args.device, cuda, cuda and args.amp, len(classes))
+    per_class = [{"index": i, "label": label, "support": int(confusion[i].sum()), "correct": int(confusion[i, i]), "accuracy": (confusion[i, i].item() / confusion[i].sum().item() if confusion[i].sum() else None)} for i, label in enumerate(classes)]
+    augmentation = augmentation_options(args)
+    training = {"epochs": args.epochs, "optimizer": args.optimizer, "learning_rate": args.learning_rate, "weight_decay": args.weight_decay, "scheduler": args.scheduler, "label_smoothing": args.label_smoothing, "class_balancing": balance, "class_weight_power": args.class_weight_power, "normalization": {"method": args.normalization, "mean": mean, "std": std}, "augmentation": augmentation, "seed": args.seed, "best_validation_accuracy": best_accuracy, "final_validation_accuracy": final_accuracy, "per_class_accuracy": per_class, "batch_size": args.batch_size, "workers": args.workers, "amp": cuda and args.amp, "dataset_cached_on_cuda": cached, "model": model_name, "model_config": config.export()}
+    model_tag = f"lenet_{model_name}" if model_name != "lenet5" else "lenet5"; model_path, json_path = save_bundle(build_bundle(model, args.dataset, classes, prep, training), args.output_dir / f"{model_tag}_{args.dataset}.pt")
+    if args.report_confusion_matrix:
+        metrics_path = model_path.with_suffix(".metrics.json"); metrics_path.write_text(json.dumps({"validation_accuracy": final_accuracy, "classes": classes, "confusion_matrix": confusion.tolist(), "per_class": per_class}, indent=2) + "\n", encoding="utf-8")
+        print(f"Saved validation metrics: {metrics_path}")
     print(f"Saved best model: {model_path}\nSaved inference manifest: {json_path}")
 
 

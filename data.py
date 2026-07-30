@@ -11,53 +11,79 @@ from torchvision import datasets, transforms
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 LETTERS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 EMNIST_BYCLASS_CLASSES = tuple(string.digits + string.ascii_uppercase + string.ascii_lowercase)
+MNIST_NORMALIZATION = (0.1307, 0.3081)
 
 
-def preprocessing_metadata() -> dict:
+def preprocessing_metadata(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1]) -> dict:
     return {"source_color": "grayscale", "pixel_range_before_normalization": [0.0, 1.0], "operations": [
         {"op": "resize", "size": [28, 28], "interpolation": "bilinear"},
         {"op": "pad", "left": 2, "top": 2, "right": 2, "bottom": 2, "fill": 0},
         {"op": "to_tensor", "layout": "CHW", "dtype": "float32"},
-        {"op": "normalize", "mean": [0.1307], "std": [0.3081], "formula": "(x - mean) / std"},
+        {"op": "normalize", "mean": [mean], "std": [std], "formula": "(x - mean) / std"},
     ]}
 
 
-def image_transform():
-    return transforms.Compose([transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+def _geometric_augmentation(enabled: bool, rotation_degrees: float, translate: float,
+                            scale_min: float, scale_max: float, shear_degrees: float):
+    """Return an opt-in handwriting augmentation, before resizing and padding."""
+    if not enabled:
+        return []
+    if not 0 <= translate < 1:
+        raise ValueError("augmentation translate must be in [0, 1)")
+    if scale_min <= 0 or scale_max < scale_min:
+        raise ValueError("augmentation scale range must be positive and ordered")
+    return [transforms.RandomAffine(
+        degrees=rotation_degrees, translate=(translate, translate),
+        scale=(scale_min, scale_max), shear=shear_degrees, fill=0,
+        interpolation=transforms.InterpolationMode.BILINEAR,
+    )]
 
 
-def emnist_transform():
-    """Correct EMNIST's stored orientation, then use the shared 32×32 pipeline."""
+def image_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
+                    augment: bool = False, rotation_degrees: float = 0, translate: float = 0,
+                    scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0):
     return transforms.Compose([
-        transforms.Lambda(lambda image: image.transpose(Image.Transpose.TRANSPOSE)),
+        *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees),
         transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR),
-        transforms.Pad(2, fill=0),
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),
+        transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((mean,), (std,)),
     ])
 
 
-def nist_transform():
+def emnist_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
+                     augment: bool = False, rotation_degrees: float = 0, translate: float = 0,
+                     scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0):
+    """Correct EMNIST's stored orientation, then use the shared 32×32 pipeline."""
+    return transforms.Compose([
+        transforms.Lambda(lambda image: image.transpose(Image.Transpose.TRANSPOSE)),
+        *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees),
+        transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR),
+        transforms.Pad(2, fill=0),
+        transforms.ToTensor(),
+        transforms.Normalize((mean,), (std,)),
+    ])
+
+
+def nist_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
+                   augment: bool = False, rotation_degrees: float = 0, translate: float = 0,
+                   scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0):
     """NIST scans are dark ink on a light page; invert to MNIST polarity."""
-    return transforms.Compose([transforms.Lambda(ImageOps.invert), transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+    return transforms.Compose([transforms.Lambda(ImageOps.invert), *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees), transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((mean,), (std,))])
 
 
-def mnist_datasets(root: str | Path):
-    transform = image_transform()
-    return datasets.MNIST(str(root), train=True, download=True, transform=transform), datasets.MNIST(str(root), train=False, download=True, transform=transform)
+def mnist_datasets(root: str | Path, **transform_options):
+    return datasets.MNIST(str(root), train=True, download=True, transform=image_transform(**transform_options)), datasets.MNIST(str(root), train=False, download=True, transform=image_transform(**transform_options))
 
 
-def emnist_byclass_datasets(root: str | Path):
+def emnist_byclass_datasets(root: str | Path, **transform_options):
     """EMNIST ByClass: 814,255 handwritten digits and upper/lower-case letters."""
-    transform = emnist_transform()
     return (
-        datasets.EMNIST(str(root), split="byclass", train=True, download=True, transform=transform),
-        datasets.EMNIST(str(root), split="byclass", train=False, download=True, transform=transform),
+        datasets.EMNIST(str(root), split="byclass", train=True, download=True, transform=emnist_transform(**transform_options)),
+        datasets.EMNIST(str(root), split="byclass", train=False, download=True, transform=emnist_transform(**transform_options)),
     )
 
 
-def emnist_preprocessing_metadata() -> dict:
-    metadata = preprocessing_metadata()
+def emnist_preprocessing_metadata(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1]) -> dict:
+    metadata = preprocessing_metadata(mean, std)
     metadata["operations"].insert(0, {"op": "transpose", "apply_to": "dataset", "reason": "correct EMNIST storage orientation"})
     return metadata
 
@@ -95,7 +121,12 @@ class NIST19Letters(Dataset):
 
     def __len__(self): return len(self.samples)
 
-    def __getitem__(self, index):
+    def raw_item(self, index):
+        """Return an independent raw image so train/validation splits can differ in augmentation."""
         path, target = self.samples[index]
         with Image.open(path) as image:
-            return self.transform(image.convert("L")), target
+            return image.convert("L").copy(), target
+
+    def __getitem__(self, index):
+        image, target = self.raw_item(index)
+        return self.transform(image), target

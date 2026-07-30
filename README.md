@@ -28,19 +28,36 @@ python3 train.py nist19 --nist-root /path/to/by_class --output-dir exports/nist1
 python3 train.py emnist-byclass --output-dir exports/emnist-byclass --epochs 30
 ```
 
-`emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. It uses the larger LeNet variant by default (16→48→192 convolution channels and a 256-unit hidden layer), while preserving LeNet's Tanh activations, average pooling, convolutional layout, and Adam/cross-entropy training method. Select `--model lenet5`, `--model large`, or `--model max` explicitly to override the default. Its default export is `exports/emnist-byclass/lenet_large_emnist-byclass.pt`.
+`emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. It uses the larger LeNet variant by default (16→48→192 convolution channels and a 256-unit hidden layer). Select `--model lenet5`, `--model large`, or `--model max` explicitly to override the default. Its default export is `exports/emnist-byclass/lenet_large_emnist-byclass.pt`.
 
 EMNIST files are transposed in storage. The trainer corrects that source-only detail; browser drawings stay upright. Retrain any EMNIST export made before this correction so it is not based on mirrored characters.
 
 ## Model configuration
 
-Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). All retain the same three-convolution LeNet topology and can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, or `silu`, plus `avg` or `max` pooling. You can also override the convolution widths and hidden layer:
+Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, or `silu`, plus `avg` or `max` pooling. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
 
 ```bash
-python3 train.py emnist-byclass --model max --activation gelu --pooling max --channels 40,120,480 --hidden-dim 640 --output-dir exports/emnist-max --epochs 30
+python3 train.py emnist-byclass --model max --activation gelu --pooling max --channels 40,120,480 --hidden-dim 640 --batch-norm --dropout 0.2 --output-dir exports/emnist-max --epochs 50
 ```
 
 Every exported model includes its resolved configuration and explicit activation/pooling operations in its manifest, so `gui.py` and `export_model.py` can reload any supported combination.
+
+Training defaults to AdamW (`1e-3`, `1e-4` weight decay) and cosine learning-rate decay. All optimization choices are configurable: `--optimizer adam`, `--weight-decay 0`, `--scheduler none`, or `--scheduler plateau`. Cross-entropy label smoothing is opt-in with `--label-smoothing`.
+
+## Accuracy-focused EMNIST training
+
+EMNIST uses training-only affine augmentation by default (rotation, translation, scale, and shear), dataset-specific normalization measured from the training split, inverse-frequency weighted loss, AdamW, and cosine decay. Validation and browser inference never use augmentation. Every setting can be disabled or tuned:
+
+```bash
+python3 train.py emnist-byclass --model max --activation gelu --pooling max \
+  --batch-norm --dropout 0.2 --epochs 50 --batch-size 1024 \
+  --rotation-degrees 15 --translate 0.12 --scale-min 0.85 --scale-max 1.15 --shear-degrees 12 \
+  --class-balancing loss --class-weight-power 0.5 \
+  --optimizer adamw --learning-rate 1e-3 --weight-decay 1e-4 --scheduler cosine \
+  --output-dir exports/emnist-max
+```
+
+Use `--no-augment`, `--normalization mnist`, `--class-balancing none`, `--scheduler none`, `--no-batch-norm`, and `--dropout 0` for ablations or legacy-style runs. `--class-balancing sampler` uses weighted sampling instead of weighted loss. Training writes `<model>.metrics.json`, which contains the validation confusion matrix and per-class accuracy; the same per-class summary is retained in the checkpoint manifest.
 
 ## Faster training
 

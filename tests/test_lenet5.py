@@ -35,6 +35,19 @@ class LeNet5Tests(unittest.TestCase):
         self.assertEqual(restored.config, config)
         self.assertEqual(tuple(LeNetMax(62)(torch.zeros(1, 1, 32, 32)).shape), (1, 62))
 
+    def test_regularization_is_exported_without_changing_original_lenet5(self):
+        original = LeNet5(10)
+        self.assertEqual(list(original.state_dict()), [
+            "features.0.weight", "features.0.bias", "features.3.weight", "features.3.bias",
+            "features.6.weight", "features.6.bias", "classifier.1.weight", "classifier.1.bias",
+            "classifier.3.weight", "classifier.3.bias",
+        ])
+        config = make_config("max", batch_norm=True, dropout=0.2)
+        meta = architecture_metadata(62, config=config)
+        self.assertTrue(any(layer["op"] == "batch_norm2d" for layer in meta["layers"]))
+        self.assertTrue(any(layer["op"] == "dropout" for layer in meta["layers"]))
+        self.assertEqual(model_from_architecture(meta, 62).config, config)
+
     def test_web_input_skips_emnist_storage_orientation_correction(self):
         image = Image.new("L", (2, 3))
         image.putpixel((0, 0), 255)
