@@ -1,0 +1,318 @@
+{
+  "format_version": 1,
+  "architecture": {
+    "id": "lenet5-tanh-32x32-v1",
+    "input": {
+      "layout": "NCHW",
+      "dtype": "float32",
+      "shape": [
+        1,
+        1,
+        32,
+        32
+      ]
+    },
+    "convolution_semantics": "cross_correlation",
+    "layers": [
+      {
+        "name": "features.0",
+        "op": "conv2d",
+        "weight_key": "features.0.weight",
+        "bias_key": "features.0.bias",
+        "weight_layout": "OIHW",
+        "in_channels": 1,
+        "out_channels": 6,
+        "kernel": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "padding": [
+          0,
+          0
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1
+      },
+      {
+        "name": "features.1",
+        "op": "tanh"
+      },
+      {
+        "name": "features.2",
+        "op": "avg_pool2d",
+        "kernel": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "padding": [
+          0,
+          0
+        ],
+        "ceil_mode": false,
+        "count_include_pad": true
+      },
+      {
+        "name": "features.3",
+        "op": "conv2d",
+        "weight_key": "features.3.weight",
+        "bias_key": "features.3.bias",
+        "weight_layout": "OIHW",
+        "in_channels": 6,
+        "out_channels": 16,
+        "kernel": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "padding": [
+          0,
+          0
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1
+      },
+      {
+        "name": "features.4",
+        "op": "tanh"
+      },
+      {
+        "name": "features.5",
+        "op": "avg_pool2d",
+        "kernel": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "padding": [
+          0,
+          0
+        ],
+        "ceil_mode": false,
+        "count_include_pad": true
+      },
+      {
+        "name": "features.6",
+        "op": "conv2d",
+        "weight_key": "features.6.weight",
+        "bias_key": "features.6.bias",
+        "weight_layout": "OIHW",
+        "in_channels": 16,
+        "out_channels": 120,
+        "kernel": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "padding": [
+          0,
+          0
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1
+      },
+      {
+        "name": "features.7",
+        "op": "tanh"
+      },
+      {
+        "name": "classifier.0",
+        "op": "flatten",
+        "start_dim": 1,
+        "end_dim": -1
+      },
+      {
+        "name": "classifier.1",
+        "op": "linear",
+        "weight_key": "classifier.1.weight",
+        "bias_key": "classifier.1.bias",
+        "weight_layout": "OI",
+        "in_features": 120,
+        "out_features": 84
+      },
+      {
+        "name": "classifier.2",
+        "op": "tanh"
+      },
+      {
+        "name": "classifier.3",
+        "op": "linear",
+        "weight_key": "classifier.3.weight",
+        "bias_key": "classifier.3.bias",
+        "weight_layout": "OI",
+        "in_features": 84,
+        "out_features": 10
+      }
+    ],
+    "output": {
+      "type": "logits",
+      "shape": [
+        1,
+        10
+      ],
+      "postprocess": "softmax over class dimension for probabilities"
+    }
+  },
+  "dataset": "mnist",
+  "classes": [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9"
+  ],
+  "preprocessing": {
+    "source_color": "grayscale",
+    "pixel_range_before_normalization": [
+      0.0,
+      1.0
+    ],
+    "operations": [
+      {
+        "op": "resize",
+        "size": [
+          28,
+          28
+        ],
+        "interpolation": "bilinear"
+      },
+      {
+        "op": "pad",
+        "left": 2,
+        "top": 2,
+        "right": 2,
+        "bottom": 2,
+        "fill": 0
+      },
+      {
+        "op": "to_tensor",
+        "layout": "CHW",
+        "dtype": "float32"
+      },
+      {
+        "op": "normalize",
+        "mean": [
+          0.1307
+        ],
+        "std": [
+          0.3081
+        ],
+        "formula": "(x - mean) / std"
+      }
+    ]
+  },
+  "training": {
+    "epochs": 5,
+    "optimizer": "Adam",
+    "learning_rate": 0.001,
+    "seed": 42,
+    "best_validation_accuracy": 0.9873
+  },
+  "weights": {
+    "file": "lenet5_mnist.weights.npz",
+    "format": "npz",
+    "tensors": {
+      "features.0.weight": {
+        "shape": [
+          6,
+          1,
+          5,
+          5
+        ],
+        "dtype": "float32"
+      },
+      "features.0.bias": {
+        "shape": [
+          6
+        ],
+        "dtype": "float32"
+      },
+      "features.3.weight": {
+        "shape": [
+          16,
+          6,
+          5,
+          5
+        ],
+        "dtype": "float32"
+      },
+      "features.3.bias": {
+        "shape": [
+          16
+        ],
+        "dtype": "float32"
+      },
+      "features.6.weight": {
+        "shape": [
+          120,
+          16,
+          5,
+          5
+        ],
+        "dtype": "float32"
+      },
+      "features.6.bias": {
+        "shape": [
+          120
+        ],
+        "dtype": "float32"
+      },
+      "classifier.1.weight": {
+        "shape": [
+          84,
+          120
+        ],
+        "dtype": "float32"
+      },
+      "classifier.1.bias": {
+        "shape": [
+          84
+        ],
+        "dtype": "float32"
+      },
+      "classifier.3.weight": {
+        "shape": [
+          10,
+          84
+        ],
+        "dtype": "float32"
+      },
+      "classifier.3.bias": {
+        "shape": [
+          10
+        ],
+        "dtype": "float32"
+      }
+    }
+  }
+}
