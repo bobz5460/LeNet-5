@@ -28,7 +28,19 @@ python3 train.py nist19 --nist-root /path/to/by_class --output-dir exports/nist1
 python3 train.py emnist-byclass --output-dir exports/emnist-byclass --epochs 30
 ```
 
-`emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. It uses the larger LeNet variant by default (16→48→192 convolution channels and a 256-unit hidden layer), while preserving LeNet's Tanh activations, average pooling, convolutional layout, and Adam/cross-entropy training method. Select `--model lenet5` or `--model large` explicitly to override the default. Its default export is `exports/emnist-byclass/lenet_large_emnist-byclass.pt`.
+`emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. It uses the larger LeNet variant by default (16→48→192 convolution channels and a 256-unit hidden layer), while preserving LeNet's Tanh activations, average pooling, convolutional layout, and Adam/cross-entropy training method. Select `--model lenet5`, `--model large`, or `--model max` explicitly to override the default. Its default export is `exports/emnist-byclass/lenet_large_emnist-byclass.pt`.
+
+EMNIST files are transposed in storage. The trainer corrects that source-only detail; browser drawings stay upright. Retrain any EMNIST export made before this correction so it is not based on mirrored characters.
+
+## Model configuration
+
+Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). All retain the same three-convolution LeNet topology and can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, or `silu`, plus `avg` or `max` pooling. You can also override the convolution widths and hidden layer:
+
+```bash
+python3 train.py emnist-byclass --model max --activation gelu --pooling max --channels 40,120,480 --hidden-dim 640 --output-dir exports/emnist-max --epochs 30
+```
+
+Every exported model includes its resolved configuration and explicit activation/pooling operations in its manifest, so `gui.py` and `export_model.py` can reload any supported combination.
 
 ## Faster training
 

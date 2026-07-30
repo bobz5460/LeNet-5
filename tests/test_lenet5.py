@@ -3,7 +3,7 @@ import torch
 from PIL import Image
 
 from data import emnist_preprocessing_metadata
-from lenet5 import LeNet5, LeNetLarge, architecture_metadata, model_from_architecture
+from lenet5 import LeNet5, LeNetLarge, LeNetMax, ConfigurableLeNet, architecture_metadata, make_config, model_from_architecture
 from webui_preprocess import preprocess
 
 
@@ -24,12 +24,37 @@ class LeNet5Tests(unittest.TestCase):
         self.assertEqual([x["op"] for x in meta["layers"]].count("avg_pool2d"), 2)
         self.assertIsInstance(model_from_architecture(meta["id"], 62), LeNetLarge)
 
+    def test_configurable_max_model_and_manifest_round_trip(self):
+        config = make_config("max", activation="gelu", pooling="max", channels=(40, 120, 480), hidden_dim=640)
+        model = ConfigurableLeNet(62, config)
+        self.assertEqual(tuple(model(torch.zeros(2, 1, 32, 32)).shape), (2, 62))
+        meta = architecture_metadata(62, config=config)
+        self.assertEqual(meta["config"]["activation"], "gelu")
+        self.assertEqual([layer["op"] for layer in meta["layers"]].count("max_pool2d"), 2)
+        restored = model_from_architecture(meta, 62)
+        self.assertEqual(restored.config, config)
+        self.assertEqual(tuple(LeNetMax(62)(torch.zeros(1, 1, 32, 32)).shape), (1, 62))
+
     def test_web_input_skips_emnist_storage_orientation_correction(self):
         image = Image.new("L", (2, 3))
         image.putpixel((0, 0), 255)
         _, preview = preprocess(image, emnist_preprocessing_metadata())
         # Pixel stays in the upper-left after resize/pad; it is not rotated for web input.
         self.assertGreater(preview.getpixel((2, 2)), 0)
+        operations = emnist_preprocessing_metadata()["operations"]
+        self.assertEqual([operation["op"] for operation in operations if operation.get("apply_to") == "dataset"], ["transpose"])
+
+    def test_web_input_translates_legacy_emnist_orientation(self):
+        metadata = emnist_preprocessing_metadata()
+        metadata["operations"] = [
+            {"op": "transpose", "reason": "correct EMNIST storage orientation"},
+            {"op": "flip_horizontal", "reason": "correct EMNIST storage orientation"},
+            *metadata["operations"][1:],
+        ]
+        image = Image.new("L", (2, 3)); image.putpixel((0, 0), 255)
+        _, preview = preprocess(image, metadata)
+        # A legacy model expects the mirrored, but not quarter-turned, drawing.
+        self.assertGreater(preview.getpixel((29, 2)), 0)
 
 
 if __name__ == "__main__": unittest.main()

@@ -29,7 +29,7 @@ def image_transform():
 def emnist_transform():
     """Correct EMNIST's stored orientation, then use the shared 32×32 pipeline."""
     return transforms.Compose([
-        transforms.Lambda(lambda image: image.transpose(Image.Transpose.TRANSPOSE).transpose(Image.Transpose.FLIP_LEFT_RIGHT)),
+        transforms.Lambda(lambda image: image.transpose(Image.Transpose.TRANSPOSE)),
         transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Pad(2, fill=0),
         transforms.ToTensor(),
@@ -58,7 +58,6 @@ def emnist_byclass_datasets(root: str | Path):
 
 def emnist_preprocessing_metadata() -> dict:
     metadata = preprocessing_metadata()
-    metadata["operations"].insert(0, {"op": "flip_horizontal", "apply_to": "dataset", "reason": "correct EMNIST storage orientation"})
     metadata["operations"].insert(0, {"op": "transpose", "apply_to": "dataset", "reason": "correct EMNIST storage orientation"})
     return metadata
 

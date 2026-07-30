@@ -8,9 +8,18 @@ from PIL import Image, ImageOps
 
 def preprocess(image: Image.Image, metadata: dict) -> tuple[torch.Tensor, Image.Image]:
     result = image.convert("L")
+    # Older EMNIST exports applied transpose then horizontal flip to raw files.
+    # Since a browser drawing is already upright, its equivalent model input is
+    # only the horizontal flip (the old model was trained on mirrored glyphs).
+    legacy_emnist = any(
+        operation.get("reason") == "correct EMNIST storage orientation" and "apply_to" not in operation
+        for operation in metadata["operations"]
+    )
     for operation in metadata["operations"]:
         # EMNIST files are stored sideways; browser drawings are already upright.
-        if operation.get("apply_to") == "dataset" or operation.get("reason") == "correct EMNIST storage orientation":
+        if operation.get("apply_to") == "dataset":
+            continue
+        if legacy_emnist and operation["op"] == "transpose":
             continue
         op = operation["op"]
         if op == "invert": result = ImageOps.invert(result)

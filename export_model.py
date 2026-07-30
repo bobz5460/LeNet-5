@@ -6,12 +6,11 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 import torch
-from lenet5 import ARCHITECTURE_VERSION, LARGE_ARCHITECTURE_VERSION, LeNet5, LeNetLarge, architecture_metadata, model_from_architecture
+from lenet5 import ARCHITECTURE_VERSION, CONFIGURABLE_ARCHITECTURE_VERSION, LARGE_ARCHITECTURE_VERSION, MAX_ARCHITECTURE_VERSION, ConfigurableLeNet, architecture_metadata, model_from_architecture
 
 
-def build_bundle(model: LeNet5 | LeNetLarge, dataset: str, classes: list[str], preprocessing: dict, training: dict | None = None) -> dict[str, Any]:
-    variant = "large" if isinstance(model, LeNetLarge) else "lenet5"
-    return {"format_version": 1, "architecture": architecture_metadata(len(classes), variant), "dataset": dataset, "classes": classes, "preprocessing": preprocessing, "training": training or {}, "state_dict": model.state_dict()}
+def build_bundle(model: ConfigurableLeNet, dataset: str, classes: list[str], preprocessing: dict, training: dict | None = None) -> dict[str, Any]:
+    return {"format_version": 1, "architecture": architecture_metadata(len(classes), config=model.config), "dataset": dataset, "classes": classes, "preprocessing": preprocessing, "training": training or {}, "state_dict": model.state_dict()}
 
 
 def manifest(bundle: dict[str, Any], weights_file: str | None = None) -> dict[str, Any]:
@@ -32,8 +31,9 @@ def save_bundle(bundle: dict[str, Any], path: str | Path):
 def load_model(path: str | Path, device="cpu"):
     bundle = torch.load(path, map_location=device, weights_only=False)
     architecture_id = bundle.get("architecture", {}).get("id")
-    if bundle.get("format_version") != 1 or architecture_id not in {ARCHITECTURE_VERSION, LARGE_ARCHITECTURE_VERSION}: raise ValueError("Not a supported self-describing LeNet export")
-    model = model_from_architecture(architecture_id, len(bundle["classes"])).to(device); model.load_state_dict(bundle["state_dict"]); model.eval()
+    supported = {ARCHITECTURE_VERSION, LARGE_ARCHITECTURE_VERSION, MAX_ARCHITECTURE_VERSION, CONFIGURABLE_ARCHITECTURE_VERSION}
+    if bundle.get("format_version") != 1 or architecture_id not in supported: raise ValueError("Not a supported self-describing LeNet export")
+    model = model_from_architecture(bundle["architecture"], len(bundle["classes"])).to(device); model.load_state_dict(bundle["state_dict"]); model.eval()
     return model, bundle
 
 

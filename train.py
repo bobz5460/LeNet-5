@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, random_split
 
 from data import EMNIST_BYCLASS_CLASSES, LETTERS, NIST19Letters, emnist_byclass_datasets, emnist_preprocessing_metadata, mnist_datasets, preprocessing_metadata
 from export_model import build_bundle, save_bundle
-from lenet5 import LeNet5, LeNetLarge
+from lenet5 import ACTIVATIONS, POOLINGS, MODEL_PRESETS, ConfigurableLeNet, make_config
 
 
 def evaluate(model, loader, device, non_blocking, amp_enabled):
@@ -48,7 +48,12 @@ def evaluate_cached(model, images, labels, batch_size, amp_enabled):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", choices=("mnist", "nist19", "emnist-byclass")); parser.add_argument("--data-root", default="data")
-    parser.add_argument("--model", choices=("lenet5", "large"), default=None, help="Network size; emnist-byclass defaults to large")
+    parser.add_argument("--model", choices=tuple(MODEL_PRESETS), default=None, help="Network preset; emnist-byclass defaults to large")
+    parser.add_argument("--activation", choices=ACTIVATIONS, default="tanh", help="Nonlinearity after each convolution and hidden layer")
+    parser.add_argument("--pooling", choices=POOLINGS, default="avg", help="Pooling method after the first two convolutions")
+    parser.add_argument("--channels", help="Override convolution widths as c1,c2,c3 (for example: 24,72,288)")
+    parser.add_argument("--hidden-dim", type=int, help="Override hidden-layer width")
+    parser.add_argument("--leaky-relu-slope", type=float, default=0.01, help="Negative slope when --activation leaky_relu")
     parser.add_argument("--nist-root", type=Path); parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--epochs", type=int, default=10); parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=1e-3); parser.add_argument("--val-fraction", type=float, default=0.1)
@@ -86,7 +91,16 @@ def main():
         train_loader = DataLoader(train_set, args.batch_size, shuffle=True, **loader_args)
         val_loader = DataLoader(val_set, args.batch_size, **loader_args)
     model_name = args.model or ("large" if args.dataset == "emnist-byclass" else "lenet5")
-    model = (LeNetLarge if model_name == "large" else LeNet5)(len(classes)).to(args.device)
+    try:
+        channels = tuple(int(value) for value in args.channels.split(",")) if args.channels else None
+        if channels is not None and len(channels) != 3: raise ValueError
+    except ValueError:
+        parser.error("--channels must be three comma-separated positive integers, e.g. 24,72,288")
+    try:
+        config = make_config(model_name, activation=args.activation, pooling=args.pooling, channels=channels, hidden_dim=args.hidden_dim, leaky_relu_slope=args.leaky_relu_slope)
+    except ValueError as error:
+        parser.error(str(error))
+    model = ConfigurableLeNet(len(classes), config).to(args.device)
     if args.compile: model = torch.compile(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate); loss_fn = nn.CrossEntropyLoss(); scaler = torch.cuda.amp.GradScaler(enabled=cuda and args.amp); best_state, best_accuracy = None, -1.0
     for epoch in range(1, args.epochs + 1):
@@ -104,8 +118,8 @@ def main():
             best_state = {k: v.detach().cpu().clone() for k, v in state_model.state_dict().items()}
     if args.compile: model = model._orig_mod
     model.load_state_dict(best_state)
-    training = {"epochs": args.epochs, "optimizer": "Adam", "learning_rate": args.learning_rate, "seed": args.seed, "best_validation_accuracy": best_accuracy, "batch_size": args.batch_size, "workers": args.workers, "amp": cuda and args.amp, "dataset_cached_on_cuda": cached, "model": model_name}
-    model_tag = "lenet5" if model_name == "lenet5" else "lenet_large"
+    training = {"epochs": args.epochs, "optimizer": "Adam", "learning_rate": args.learning_rate, "seed": args.seed, "best_validation_accuracy": best_accuracy, "batch_size": args.batch_size, "workers": args.workers, "amp": cuda and args.amp, "dataset_cached_on_cuda": cached, "model": model_name, "model_config": config.export()}
+    model_tag = f"lenet_{model_name}" if model_name != "lenet5" else "lenet5"
     model_path, json_path = save_bundle(build_bundle(model, args.dataset, classes, prep, training), args.output_dir / f"{model_tag}_{args.dataset}.pt")
     print(f"Saved best model: {model_path}\nSaved inference manifest: {json_path}")
 
