@@ -58,8 +58,8 @@ def emnist_byclass_datasets(root: str | Path):
 
 def emnist_preprocessing_metadata() -> dict:
     metadata = preprocessing_metadata()
-    metadata["operations"].insert(0, {"op": "flip_horizontal", "reason": "correct EMNIST storage orientation"})
-    metadata["operations"].insert(0, {"op": "transpose", "reason": "correct EMNIST storage orientation"})
+    metadata["operations"].insert(0, {"op": "flip_horizontal", "apply_to": "dataset", "reason": "correct EMNIST storage orientation"})
+    metadata["operations"].insert(0, {"op": "transpose", "apply_to": "dataset", "reason": "correct EMNIST storage orientation"})
     return metadata
 
 

@@ -9,6 +9,9 @@ from PIL import Image, ImageOps
 def preprocess(image: Image.Image, metadata: dict) -> tuple[torch.Tensor, Image.Image]:
     result = image.convert("L")
     for operation in metadata["operations"]:
+        # EMNIST files are stored sideways; browser drawings are already upright.
+        if operation.get("apply_to") == "dataset" or operation.get("reason") == "correct EMNIST storage orientation":
+            continue
         op = operation["op"]
         if op == "invert": result = ImageOps.invert(result)
         elif op == "transpose": result = result.transpose(Image.Transpose.TRANSPOSE)
