@@ -145,6 +145,7 @@ def main():
     parser.add_argument("--batch-norm", action=argparse.BooleanOptionalAction, default=None, help="Insert BatchNorm after conv/hidden layers")
     parser.add_argument("--dropout", type=float, default=None, help="Classifier dropout probability (0 preserves LeNet)")
     parser.add_argument("--nist-root", type=Path); parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-file", type=Path, help="Checkpoint filename within --output-dir (defaults to the model and dataset name)")
     parser.add_argument("--epochs", type=int, default=10); parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--optimizer", choices=("adam", "adamw"), default="adamw"); parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4); parser.add_argument("--label-smoothing", type=float, default=0.05)
@@ -242,7 +243,13 @@ def main():
     per_class = [{"index": i, "label": label, "support": int(confusion[i].sum()), "correct": int(confusion[i, i]), "accuracy": (confusion[i, i].item() / confusion[i].sum().item() if confusion[i].sum() else None)} for i, label in enumerate(classes)]
     augmentation = augmentation_options(args)
     training = {"epochs": args.epochs, "optimizer": args.optimizer, "learning_rate": args.learning_rate, "weight_decay": args.weight_decay, "scheduler": args.scheduler, "label_smoothing": args.label_smoothing, "class_balancing": balance, "class_weight_power": args.class_weight_power, "normalization": {"method": args.normalization, "mean": mean, "std": std}, "augmentation": augmentation, "seed": args.seed, "best_validation_accuracy": best_accuracy, "final_validation_accuracy": final_accuracy, "per_class_accuracy": per_class, "batch_size": args.batch_size, "workers": args.workers, "amp": cuda and args.amp, "dataset_cache": args.cache_dataset, "dataset_cached_on_cuda": args.cache_dataset == "cuda", "model": model_name, "model_config": config.export()}
-    model_tag = f"lenet_{model_name}" if model_name != "lenet5" else "lenet5"; model_path, json_path = save_bundle(build_bundle(model, args.dataset, classes, prep, training), args.output_dir / f"{model_tag}_{args.dataset}.pt")
+    model_tag = f"lenet_{model_name}" if model_name != "lenet5" else "lenet5"
+    if args.output_file is not None and args.output_file.parent != Path("."):
+        parser.error("--output-file must be a filename, not a path; use --output-dir to choose its directory")
+    output_name = args.output_file.name if args.output_file is not None else f"{model_tag}_{args.dataset}.pt"
+    if not output_name.endswith(".pt"):
+        output_name += ".pt"
+    model_path, json_path = save_bundle(build_bundle(model, args.dataset, classes, prep, training), args.output_dir / output_name)
     if args.report_confusion_matrix:
         metrics_path = model_path.with_suffix(".metrics.json"); metrics_path.write_text(json.dumps({"validation_accuracy": final_accuracy, "classes": classes, "confusion_matrix": confusion.tolist(), "per_class": per_class}, indent=2) + "\n", encoding="utf-8")
         print(f"Saved validation metrics: {metrics_path}")

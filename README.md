@@ -28,6 +28,14 @@ python3 train.py nist19 --nist-root /path/to/by_class --output-dir exports/nist1
 python3 train.py emnist-byclass --output-dir exports/emnist-byclass --epochs 30
 ```
 
+By default, the checkpoint name is based on the selected model and dataset. Supply
+`--output-file` to choose it yourself; the adjacent manifest, weights archive, and
+metrics file use the same base name:
+
+```bash
+python3 train.py mnist --output-dir exports/mnist --output-file my-digits-model.pt --epochs 10
+```
+
 `emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. Training now defaults to the wider `large` model for every dataset, with GELU, max pooling, batch normalization, dropout, label smoothing, and affine augmentation. This is a better baseline for handwriting collected outside the benchmark. Select `--model lenet5` for the original 6→16→120 Tanh/average-pooling topology, or select `--model large`/`--model max` explicitly.
 
 EMNIST files are transposed in storage. The trainer corrects that source-only detail; browser drawings stay upright. Retrain any EMNIST export made before this correction so it is not based on mirrored characters.
