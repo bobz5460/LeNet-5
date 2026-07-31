@@ -125,6 +125,26 @@ def normalization_stats(dataset: Dataset, workers: int, batch_size: int) -> tupl
     return mean, max(pixel_square_sum / count - mean * mean, 1e-12) ** 0.5
 
 
+def choose_cache_mode(requested: str, train_count: int, val_count: int, cuda: bool) -> str:
+    """Use VRAM caching automatically only when there is ample free memory.
+
+    Caching removes per-batch PIL/DataLoader work, which otherwise dominates tiny
+    LeNet batches.  The conservative limit also leaves room for the temporary
+    tensors used while concatenating the cache and for other GPU workloads.
+    """
+    if requested != "auto":
+        return requested
+    if not cuda:
+        return "none"
+    free_bytes, _ = torch.cuda.mem_get_info()
+    image_bytes = (train_count + val_count) * 32 * 32 * torch.empty((), dtype=torch.float32).element_size()
+    if image_bytes <= free_bytes // 4:
+        print(f"Auto-enabling GPU dataset cache ({image_bytes / 2**20:.0f} MiB of image tensors; {free_bytes / 2**30:.1f} GiB free).")
+        return "cuda"
+    print(f"Not caching dataset on GPU: needs {image_bytes / 2**30:.1f} GiB of image tensors; only {free_bytes / 2**30:.1f} GiB is free.")
+    return "none"
+
+
 def augmentation_options(args) -> dict:
     return {"augment": args.augment, "rotation_degrees": args.rotation_degrees,
             "translate": args.translate, "scale_min": args.scale_min,
@@ -160,8 +180,10 @@ def main():
     parser.add_argument("--report-confusion-matrix", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--val-fraction", type=float, default=0.1); parser.add_argument("--seed", type=int, default=42); parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1)); parser.add_argument("--prefetch-factor", type=int, default=4)
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True); parser.add_argument("--compile", action="store_true"); parser.add_argument("--cpu-threads", type=int, default=0)
-    parser.add_argument("--cache-dataset", choices=("none", "ram", "cuda"), default="none", help="cache preprocessed data; augmentation still runs per batch")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None, help="compile automatically on CUDA to reduce small-batch overhead")
+    parser.add_argument("--cpu-threads", type=int, default=0)
+    parser.add_argument("--cache-dataset", choices=("auto", "none", "ram", "cuda"), default="auto", help="cache preprocessed data; auto uses GPU VRAM only when there is ample free space")
     args = parser.parse_args(); torch.manual_seed(args.seed); random.seed(args.seed)
     if not 0 <= args.label_smoothing < 1: parser.error("--label-smoothing must be in [0, 1)")
     if args.weight_decay < 0 or args.class_weight_power < 0: parser.error("weight decay and class-weight power must be non-negative")
@@ -171,6 +193,7 @@ def main():
     if cuda and not torch.cuda.is_available(): parser.error("--device cuda was requested, but CUDA is unavailable to PyTorch")
     if cuda: torch.backends.cudnn.benchmark = True; torch.set_float32_matmul_precision("high")
     elif args.cache_dataset == "cuda": parser.error("--cache-dataset cuda requires --device cuda")
+    compile_model = cuda if args.compile is None else args.compile
     # Initially omit normalization so the optional statistics pass sees [0, 1] pixels.
     raw_options = {"mean": 0.0, "std": 1.0, **foreground_options(args)}
     if args.dataset == "mnist":
@@ -181,6 +204,7 @@ def main():
         if args.nist_root is None: parser.error("nist19 requires --nist-root")
         full = NIST19Letters(args.nist_root); n_val = max(1, round(len(full) * args.val_fraction)); train_split, val_split = random_split(full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(args.seed)); train_set = TransformedNISTSubset(full, train_split.indices, nist_transform(**raw_options)); val_set = TransformedNISTSubset(full, val_split.indices, nist_transform(**raw_options)); classes = list(LETTERS); transform_factory = nist_transform
     mean, std = MNIST_NORMALIZATION if args.normalization == "mnist" else normalization_stats(train_set, args.workers, min(args.batch_size, 2048))
+    args.cache_dataset = choose_cache_mode(args.cache_dataset, len(train_set), len(val_set), cuda)
     cached = args.cache_dataset != "none"
     common_transform = {"mean": mean, "std": std, **foreground_options(args)}
     # Cached images must be deterministic.  Random affine augmentation is then
@@ -215,7 +239,7 @@ def main():
     try: config = make_config(model_name, activation=activation, pooling=pooling, channels=channels, hidden_dim=args.hidden_dim, leaky_relu_slope=args.leaky_relu_slope, batch_norm=batch_norm, dropout=dropout)
     except ValueError as error: parser.error(str(error))
     model = ConfigurableLeNet(len(classes), config).to(args.device)
-    if args.compile: model = torch.compile(model)
+    if compile_model: model = torch.compile(model, mode="reduce-overhead")
     optimizer = (torch.optim.AdamW if args.optimizer == "adamw" else torch.optim.Adam)(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     loss_fn = nn.CrossEntropyLoss(weight=class_weights.to(args.device) if balance == "loss" else None, label_smoothing=args.label_smoothing)
     scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=args.min_learning_rate) if args.scheduler == "cosine" else torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=args.plateau_factor, patience=args.plateau_patience, min_lr=args.min_learning_rate) if args.scheduler == "plateau" else None)
@@ -236,8 +260,8 @@ def main():
         if scheduler: scheduler.step(accuracy) if args.scheduler == "plateau" else scheduler.step()
         print(f"epoch {epoch:03d}/{args.epochs}: loss={total_loss/total:.4f}, validation_accuracy={accuracy:.2%}, learning_rate={optimizer.param_groups[0]['lr']:.2e}")
         if accuracy > best_accuracy:
-            best_accuracy = accuracy; state_model = model._orig_mod if args.compile else model; best_state = {k: v.detach().cpu().clone() for k, v in state_model.state_dict().items()}
-    if args.compile: model = model._orig_mod
+            best_accuracy = accuracy; state_model = model._orig_mod if compile_model else model; best_state = {k: v.detach().cpu().clone() for k, v in state_model.state_dict().items()}
+    if compile_model: model = model._orig_mod
     model.load_state_dict(best_state)
     final_accuracy, confusion = evaluate_cached(model, val_images, val_labels, args.batch_size, args.device, cuda and args.amp, len(classes)) if cached else evaluate(model, val_loader, args.device, cuda, cuda and args.amp, len(classes))
     per_class = [{"index": i, "label": label, "support": int(confusion[i].sum()), "correct": int(confusion[i, i]), "accuracy": (confusion[i, i].item() / confusion[i].sum().item() if confusion[i].sum() else None)} for i, label in enumerate(classes)]
