@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 
+from data import normalize_foreground
+
 
 def preprocess(image: Image.Image, metadata: dict) -> tuple[torch.Tensor, Image.Image]:
     result = image.convert("L")
@@ -23,6 +25,10 @@ def preprocess(image: Image.Image, metadata: dict) -> tuple[torch.Tensor, Image.
             continue
         op = operation["op"]
         if op == "invert": result = ImageOps.invert(result)
+        elif op == "normalize_foreground":
+            result = normalize_foreground(result, canvas_size=operation.get("canvas_size", 28),
+                                          foreground_size=operation.get("foreground_size", 20),
+                                          threshold=operation.get("threshold", 20))
         elif op == "transpose": result = result.transpose(Image.Transpose.TRANSPOSE)
         elif op == "flip_horizontal": result = result.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         elif op == "resize": result = result.resize(tuple(operation["size"]), Image.Resampling.BILINEAR)

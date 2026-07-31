@@ -2,7 +2,7 @@ import unittest
 import torch
 from PIL import Image
 
-from data import emnist_preprocessing_metadata
+from data import emnist_preprocessing_metadata, normalize_foreground, preprocessing_metadata
 from lenet5 import LeNet5, LeNetLarge, LeNetMax, ConfigurableLeNet, architecture_metadata, make_config, model_from_architecture
 from webui_preprocess import preprocess
 
@@ -52,13 +52,13 @@ class LeNet5Tests(unittest.TestCase):
         image = Image.new("L", (2, 3))
         image.putpixel((0, 0), 255)
         _, preview = preprocess(image, emnist_preprocessing_metadata())
-        # Pixel stays in the upper-left after resize/pad; it is not rotated for web input.
-        self.assertGreater(preview.getpixel((2, 2)), 0)
+        # The upright pixel is centered by foreground normalization; it is not rotated.
+        self.assertGreater(preview.getpixel((6, 6)), 0)
         operations = emnist_preprocessing_metadata()["operations"]
         self.assertEqual([operation["op"] for operation in operations if operation.get("apply_to") == "dataset"], ["transpose"])
 
     def test_web_input_translates_legacy_emnist_orientation(self):
-        metadata = emnist_preprocessing_metadata()
+        metadata = emnist_preprocessing_metadata(foreground_normalization=False)
         metadata["operations"] = [
             {"op": "transpose", "reason": "correct EMNIST storage orientation"},
             {"op": "flip_horizontal", "reason": "correct EMNIST storage orientation"},
@@ -68,6 +68,14 @@ class LeNet5Tests(unittest.TestCase):
         _, preview = preprocess(image, metadata)
         # A legacy model expects the mirrored, but not quarter-turned, drawing.
         self.assertGreater(preview.getpixel((29, 2)), 0)
+
+    def test_foreground_normalization_matches_mnist_geometry(self):
+        image = Image.new("L", (280, 280)); image.paste(255, (10, 50, 110, 250))
+        normalized = normalize_foreground(image)
+        self.assertEqual(normalized.size, (28, 28))
+        self.assertEqual(normalized.point(lambda value: 255 if value > 20 else 0).getbbox(), (9, 4, 19, 24))
+        _, preview = preprocess(image, preprocessing_metadata())
+        self.assertEqual(preview.size, (32, 32))
 
 
 if __name__ == "__main__": unittest.main()

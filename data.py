@@ -14,13 +14,42 @@ EMNIST_BYCLASS_CLASSES = tuple(string.digits + string.ascii_uppercase + string.a
 MNIST_NORMALIZATION = (0.1307, 0.3081)
 
 
-def preprocessing_metadata(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1]) -> dict:
-    return {"source_color": "grayscale", "pixel_range_before_normalization": [0.0, 1.0], "operations": [
+def normalize_foreground(image: Image.Image, *, canvas_size: int = 28, foreground_size: int = 20,
+                         threshold: int = 20) -> Image.Image:
+    """Crop bright ink, preserve aspect ratio, and center it on a fixed canvas.
+
+    MNIST glyphs occupy roughly a 20x20 box in a 28x28 image.  Matching that
+    geometry is important for photos and canvas drawings, whose blank margins
+    otherwise make a high MNIST test score misleading.
+    """
+    if not 0 < foreground_size <= canvas_size:
+        raise ValueError("foreground_size must be in (0, canvas_size]")
+    image = image.convert("L")
+    mask = image.point(lambda value: 255 if value > threshold else 0)
+    box = mask.getbbox()
+    if box is None:
+        return Image.new("L", (canvas_size, canvas_size), 0)
+    glyph = image.crop(box)
+    width, height = glyph.size
+    scale = foreground_size / max(width, height)
+    resized = glyph.resize((max(1, round(width * scale)), max(1, round(height * scale))), Image.Resampling.BILINEAR)
+    result = Image.new("L", (canvas_size, canvas_size), 0)
+    result.paste(resized, ((canvas_size - resized.width) // 2, (canvas_size - resized.height) // 2))
+    return result
+
+
+def preprocessing_metadata(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
+                           foreground_normalization: bool = True, foreground_size: int = 20,
+                           foreground_threshold: int = 20) -> dict:
+    operations = [
+        *([{"op": "normalize_foreground", "canvas_size": 28, "foreground_size": foreground_size,
+            "threshold": foreground_threshold, "reason": "match MNIST glyph scale and centering"}] if foreground_normalization else []),
         {"op": "resize", "size": [28, 28], "interpolation": "bilinear"},
         {"op": "pad", "left": 2, "top": 2, "right": 2, "bottom": 2, "fill": 0},
         {"op": "to_tensor", "layout": "CHW", "dtype": "float32"},
         {"op": "normalize", "mean": [mean], "std": [std], "formula": "(x - mean) / std"},
-    ]}
+    ]
+    return {"source_color": "grayscale", "pixel_range_before_normalization": [0.0, 1.0], "operations": operations}
 
 
 def _geometric_augmentation(enabled: bool, rotation_degrees: float, translate: float,
@@ -41,8 +70,11 @@ def _geometric_augmentation(enabled: bool, rotation_degrees: float, translate: f
 
 def image_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
                     augment: bool = False, rotation_degrees: float = 0, translate: float = 0,
-                    scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0):
+                    scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0,
+                    foreground_normalization: bool = True, foreground_size: int = 20,
+                    foreground_threshold: int = 20):
     return transforms.Compose([
+        *([transforms.Lambda(lambda image: normalize_foreground(image, foreground_size=foreground_size, threshold=foreground_threshold))] if foreground_normalization else []),
         *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees),
         transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((mean,), (std,)),
@@ -51,10 +83,13 @@ def image_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NOR
 
 def emnist_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
                      augment: bool = False, rotation_degrees: float = 0, translate: float = 0,
-                     scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0):
+                     scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0,
+                     foreground_normalization: bool = True, foreground_size: int = 20,
+                     foreground_threshold: int = 20):
     """Correct EMNIST's stored orientation, then use the shared 32×32 pipeline."""
     return transforms.Compose([
         transforms.Lambda(lambda image: image.transpose(Image.Transpose.TRANSPOSE)),
+        *([transforms.Lambda(lambda image: normalize_foreground(image, foreground_size=foreground_size, threshold=foreground_threshold))] if foreground_normalization else []),
         *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees),
         transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Pad(2, fill=0),
@@ -65,9 +100,11 @@ def emnist_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NO
 
 def nist_transform(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], *,
                    augment: bool = False, rotation_degrees: float = 0, translate: float = 0,
-                   scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0):
+                   scale_min: float = 1, scale_max: float = 1, shear_degrees: float = 0,
+                   foreground_normalization: bool = True, foreground_size: int = 20,
+                   foreground_threshold: int = 20):
     """NIST scans are dark ink on a light page; invert to MNIST polarity."""
-    return transforms.Compose([transforms.Lambda(ImageOps.invert), *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees), transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((mean,), (std,))])
+    return transforms.Compose([transforms.Lambda(ImageOps.invert), *([transforms.Lambda(lambda image: normalize_foreground(image, foreground_size=foreground_size, threshold=foreground_threshold))] if foreground_normalization else []), *_geometric_augmentation(augment, rotation_degrees, translate, scale_min, scale_max, shear_degrees), transforms.Resize((28, 28), interpolation=transforms.InterpolationMode.BILINEAR), transforms.Pad(2, fill=0), transforms.ToTensor(), transforms.Normalize((mean,), (std,))])
 
 
 def mnist_datasets(root: str | Path, **transform_options):
@@ -82,8 +119,8 @@ def emnist_byclass_datasets(root: str | Path, **transform_options):
     )
 
 
-def emnist_preprocessing_metadata(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1]) -> dict:
-    metadata = preprocessing_metadata(mean, std)
+def emnist_preprocessing_metadata(mean: float = MNIST_NORMALIZATION[0], std: float = MNIST_NORMALIZATION[1], **options) -> dict:
+    metadata = preprocessing_metadata(mean, std, **options)
     metadata["operations"].insert(0, {"op": "transpose", "apply_to": "dataset", "reason": "correct EMNIST storage orientation"})
     return metadata
 

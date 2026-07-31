@@ -28,13 +28,13 @@ python3 train.py nist19 --nist-root /path/to/by_class --output-dir exports/nist1
 python3 train.py emnist-byclass --output-dir exports/emnist-byclass --epochs 30
 ```
 
-`emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. It uses the larger LeNet variant by default (16→48→192 convolution channels and a 256-unit hidden layer). Select `--model lenet5`, `--model large`, or `--model max` explicitly to override the default. Its default export is `exports/emnist-byclass/lenet_large_emnist-byclass.pt`.
+`emnist-byclass` downloads EMNIST ByClass automatically. It contains 814,255 examples across 62 labels: `0–9`, `A–Z`, and `a–z`. Training now defaults to the wider `large` model for every dataset, with GELU, max pooling, batch normalization, dropout, label smoothing, and affine augmentation. This is a better baseline for handwriting collected outside the benchmark. Select `--model lenet5` for the original 6→16→120 Tanh/average-pooling topology, or select `--model large`/`--model max` explicitly.
 
 EMNIST files are transposed in storage. The trainer corrects that source-only detail; browser drawings stay upright. Retrain any EMNIST export made before this correction so it is not based on mirrored characters.
 
 ## Model configuration
 
-Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, or `silu`, plus `avg` or `max` pooling. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
+Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets default to GELU, max pooling, batch normalization, and 0.15 classifier dropout; all presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, or `silu`, plus `avg` or `max` pooling. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
 
 ```bash
 python3 train.py emnist-byclass --model max --activation gelu --pooling max --channels 40,120,480 --hidden-dim 640 --batch-norm --dropout 0.2 --output-dir exports/emnist-max --epochs 50
@@ -46,7 +46,9 @@ Training defaults to AdamW (`1e-3`, `1e-4` weight decay) and cosine learning-rat
 
 ## Accuracy-focused EMNIST training
 
-EMNIST uses training-only affine augmentation by default (rotation, translation, scale, and shear), dataset-specific normalization measured from the training split, inverse-frequency weighted loss, AdamW, and cosine decay. Validation and browser inference never use augmentation. Every setting can be disabled or tuned:
+The input pipeline also crops bright ink, preserves its aspect ratio, and centers it in a 20×20 box before the usual 28×28→32×32 conversion. This makes browser drawings and scanned custom images much closer to MNIST geometry. The exact operation is embedded in new exports, so the web UI applies it identically. Retrain old exports to receive this improvement.
+
+EMNIST uses training-only affine augmentation by default (rotation, translation, scale, and shear), dataset-specific normalization measured from the training split, inverse-frequency weighted loss, AdamW, label smoothing, and cosine decay. Validation and browser inference never use augmentation. Every setting can be disabled or tuned:
 
 ```bash
 python3 train.py emnist-byclass --model max --activation gelu --pooling max \
@@ -58,6 +60,8 @@ python3 train.py emnist-byclass --model max --activation gelu --pooling max \
 ```
 
 Use `--no-augment`, `--normalization mnist`, `--class-balancing none`, `--scheduler none`, `--no-batch-norm`, and `--dropout 0` for ablations or legacy-style runs. `--class-balancing sampler` uses weighted sampling instead of weighted loss. Training writes `<model>.metrics.json`, which contains the validation confusion matrix and per-class accuracy; the same per-class summary is retained in the checkpoint manifest.
+
+Caching preserves augmentation: the trainer caches the deterministic preprocessed images, then creates a fresh affine transform for each cached batch directly on the model device. Use `--cache-dataset cuda` to keep the data in VRAM, or `--cache-dataset ram` to keep it in system RAM and stream each batch to the GPU. With 50 GB VRAM, CUDA caching is generally the faster option; RAM caching is useful when the dataset is too large for VRAM.
 
 ## Faster training
 
