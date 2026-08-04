@@ -59,6 +59,8 @@ class LeNet5Tests(unittest.TestCase):
         clamp_layers = [layer for layer in meta["layers"] if layer["op"] == "clamp"]
         self.assertEqual(len(clamp_layers), 4)
         self.assertTrue(all(layer["min"] == -0.5 and layer["max"] == 1.0 for layer in clamp_layers))
+        layer_ops = [layer["op"] for layer in meta["layers"]]
+        self.assertTrue(all(layer_ops[index + 1] == "gelu" for index, op in enumerate(layer_ops[:-1]) if op == "clamp"))
         self.assertEqual(model_from_architecture(meta, 10).config, config)
 
     def test_clamp_activation_requires_a_bound(self):

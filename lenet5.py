@@ -11,8 +11,8 @@ from torch import nn
 ARCHITECTURE_VERSION = "lenet5-tanh-32x32-v1"
 LARGE_ARCHITECTURE_VERSION = "lenet-large-tanh-32x32-v1"
 MAX_ARCHITECTURE_VERSION = "lenet-max-tanh-32x32-v1"
-CONFIGURABLE_ARCHITECTURE_VERSION = "lenet-configurable-32x32-v3"
-REGULARIZED_ARCHITECTURE_VERSION = "lenet-configurable-32x32-v4"
+CONFIGURABLE_ARCHITECTURE_VERSION = "lenet-configurable-32x32-v4"
+REGULARIZED_ARCHITECTURE_VERSION = "lenet-configurable-32x32-v5"
 
 ACTIVATIONS = ("tanh", "relu", "gelu", "sigmoid", "leaky_relu", "elu", "silu", "clamp")
 GELU_APPROXIMATIONS = ("none", "tanh")
@@ -86,7 +86,7 @@ def activation_layer(config: LeNetConfig) -> nn.Module:
 
 
 class ActivationClamp(nn.Module):
-    """Clamp activation values while accepting either one-sided bound."""
+    """Bound a layer's pre-activation values, with optional one-sided bounds."""
 
     def __init__(self, min_value: float | None, max_value: float | None) -> None:
         super().__init__()
@@ -97,9 +97,12 @@ class ActivationClamp(nn.Module):
 
 
 def activation_layers(config: LeNetConfig) -> list[nn.Module]:
-    layers = [activation_layer(config)]
+    if config.activation == "clamp":
+        return [activation_layer(config)]
+    layers: list[nn.Module] = []
     if config.activation != "clamp" and (config.activation_clamp_min is not None or config.activation_clamp_max is not None):
         layers.append(ActivationClamp(config.activation_clamp_min, config.activation_clamp_max))
+    layers.append(activation_layer(config))
     return layers
 
 
@@ -180,9 +183,9 @@ def architecture_metadata(num_classes: int, variant: str = "lenet5", config: LeN
         name = f"features.{feature_index}"; layers.append(conv(name, in_channels, out_channels)); feature_index += 1
         if config.batch_norm:
             layers.append(batch_norm(f"features.{feature_index}", out_channels)); feature_index += 1
-        layers.append(act(f"features.{feature_index}")); feature_index += 1
         if config.activation != "clamp" and (config.activation_clamp_min is not None or config.activation_clamp_max is not None):
             layers.append(clamp(f"features.{feature_index}")); feature_index += 1
+        layers.append(act(f"features.{feature_index}")); feature_index += 1
         if has_pool:
             layers.append(pool(f"features.{feature_index}")); feature_index += 1
     classifier_index = 0
@@ -193,9 +196,9 @@ def architecture_metadata(num_classes: int, variant: str = "lenet5", config: LeN
     classifier_index += 2
     if config.batch_norm:
         layers.append(batch_norm(f"classifier.{classifier_index}", config.hidden_dim)); classifier_index += 1
-    layers.append(act(f"classifier.{classifier_index}")); classifier_index += 1
     if config.activation != "clamp" and (config.activation_clamp_min is not None or config.activation_clamp_max is not None):
         layers.append(clamp(f"classifier.{classifier_index}")); classifier_index += 1
+    layers.append(act(f"classifier.{classifier_index}")); classifier_index += 1
     if config.dropout:
         layers.append({"name": f"classifier.{classifier_index}", "op": "dropout", "p": config.dropout, "inference_behavior": "identity"}); classifier_index += 1
     layers.append({"name": f"classifier.{classifier_index}", "op": "linear", "weight_key": f"classifier.{classifier_index}.weight", "bias_key": f"classifier.{classifier_index}.bias", "weight_layout": "OI", "in_features": config.hidden_dim, "out_features": num_classes})
