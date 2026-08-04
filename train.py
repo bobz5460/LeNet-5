@@ -162,6 +162,9 @@ def main():
     parser.add_argument("--model", choices=tuple(MODEL_PRESETS), default=None, help="Network preset; defaults to a regularized large model")
     parser.add_argument("--activation", choices=ACTIVATIONS, default=None); parser.add_argument("--pooling", choices=POOLINGS, default=None)
     parser.add_argument("--channels"); parser.add_argument("--hidden-dim", type=int); parser.add_argument("--leaky-relu-slope", type=float, default=0.01)
+    parser.add_argument("--gelu-approximate", choices=("none", "tanh"), default="none", help="GELU implementation; tanh is a faster approximation")
+    parser.add_argument("--activation-clamp-min", type=float, help="Optional lower bound applied after each activation")
+    parser.add_argument("--activation-clamp-max", type=float, help="Optional upper bound applied after each activation")
     parser.add_argument("--batch-norm", action=argparse.BooleanOptionalAction, default=None, help="Insert BatchNorm after conv/hidden layers")
     parser.add_argument("--dropout", type=float, default=None, help="Classifier dropout probability (0 preserves LeNet)")
     parser.add_argument("--nist-root", type=Path); parser.add_argument("--output-dir", type=Path, required=True)
@@ -184,9 +187,11 @@ def main():
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None, help="compile automatically on CUDA to reduce small-batch overhead")
     parser.add_argument("--cpu-threads", type=int, default=0)
     parser.add_argument("--cache-dataset", choices=("auto", "none", "ram", "cuda"), default="auto", help="cache preprocessed data; auto uses GPU VRAM only when there is ample free space")
+    parser.add_argument("--cache-batch-size", type=int, default=4096, help="samples per staging transfer while caching (independent of --batch-size)")
     args = parser.parse_args(); torch.manual_seed(args.seed); random.seed(args.seed)
     if not 0 <= args.label_smoothing < 1: parser.error("--label-smoothing must be in [0, 1)")
     if args.weight_decay < 0 or args.class_weight_power < 0: parser.error("weight decay and class-weight power must be non-negative")
+    if args.cache_batch_size < 1: parser.error("--cache-batch-size must be positive")
     if not 0 < args.foreground_size <= 28 or not 0 <= args.foreground_threshold < 256: parser.error("--foreground-size must be in [1, 28] and --foreground-threshold in [0, 255]")
     if args.cpu_threads > 0: torch.set_num_threads(args.cpu_threads)
     cuda = args.device.startswith("cuda")
@@ -220,7 +225,9 @@ def main():
     sample_weights = class_weights[train_labels_cpu] if balance == "sampler" else None
     if cached:
         cache_device = args.device if args.cache_dataset == "cuda" else "cpu"
-        train_images, train_labels = cache_dataset(train_set, cache_device, min(args.workers, 8), min(args.batch_size, 4096)); val_images, val_labels = cache_dataset(val_set, cache_device, min(args.workers, 8), min(args.batch_size, 4096))
+        cache_workers = min(args.workers, 8)
+        train_images, train_labels = cache_dataset(train_set, cache_device, cache_workers, args.cache_batch_size)
+        val_images, val_labels = cache_dataset(val_set, cache_device, cache_workers, args.cache_batch_size)
     else:
         loader_args = {"num_workers": args.workers, "pin_memory": cuda}
         if args.workers > 0: loader_args.update({"persistent_workers": True, "prefetch_factor": args.prefetch_factor})
@@ -236,7 +243,7 @@ def main():
         channels = tuple(int(value) for value in args.channels.split(",")) if args.channels else None
         if channels is not None and len(channels) != 3: raise ValueError
     except ValueError: parser.error("--channels must be three comma-separated positive integers, e.g. 24,72,288")
-    try: config = make_config(model_name, activation=activation, pooling=pooling, channels=channels, hidden_dim=args.hidden_dim, leaky_relu_slope=args.leaky_relu_slope, batch_norm=batch_norm, dropout=dropout)
+    try: config = make_config(model_name, activation=activation, pooling=pooling, channels=channels, hidden_dim=args.hidden_dim, leaky_relu_slope=args.leaky_relu_slope, gelu_approximate=args.gelu_approximate, activation_clamp_min=args.activation_clamp_min, activation_clamp_max=args.activation_clamp_max, batch_norm=batch_norm, dropout=dropout)
     except ValueError as error: parser.error(str(error))
     model = ConfigurableLeNet(len(classes), config).to(args.device)
     if compile_model: model = torch.compile(model, mode="reduce-overhead")

@@ -48,6 +48,25 @@ class LeNet5Tests(unittest.TestCase):
         self.assertTrue(any(layer["op"] == "dropout" for layer in meta["layers"]))
         self.assertEqual(model_from_architecture(meta, 62).config, config)
 
+    def test_activation_clamp_and_gelu_approximation_are_configurable_and_exported(self):
+        config = make_config("large", activation="gelu", gelu_approximate="tanh", activation_clamp_min=-0.5, activation_clamp_max=1.0)
+        model = ConfigurableLeNet(10, config)
+        self.assertEqual(tuple(model(torch.zeros(2, 1, 32, 32)).shape), (2, 10))
+        meta = architecture_metadata(10, config=config)
+        gelu_layers = [layer for layer in meta["layers"] if layer["op"] == "gelu"]
+        self.assertEqual(len(gelu_layers), 4)
+        self.assertTrue(all(layer["approximate"] == "tanh" for layer in gelu_layers))
+        clamp_layers = [layer for layer in meta["layers"] if layer["op"] == "clamp"]
+        self.assertEqual(len(clamp_layers), 4)
+        self.assertTrue(all(layer["min"] == -0.5 and layer["max"] == 1.0 for layer in clamp_layers))
+        self.assertEqual(model_from_architecture(meta, 10).config, config)
+
+    def test_clamp_activation_requires_a_bound(self):
+        with self.assertRaisesRegex(ValueError, "requires"):
+            make_config("lenet5", activation="clamp")
+        config = make_config("lenet5", activation="clamp", activation_clamp_max=0.5)
+        self.assertEqual([layer["op"] for layer in architecture_metadata(10, config=config)["layers"]].count("clamp"), 4)
+
     def test_web_input_skips_emnist_storage_orientation_correction(self):
         image = Image.new("L", (2, 3))
         image.putpixel((0, 0), 255)

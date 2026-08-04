@@ -42,10 +42,14 @@ EMNIST files are transposed in storage. The trainer corrects that source-only de
 
 ## Model configuration
 
-Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets default to GELU, max pooling, batch normalization, and 0.15 classifier dropout; all presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, or `silu`, plus `avg` or `max` pooling. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
+Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets default to GELU, max pooling, batch normalization, and 0.15 classifier dropout; all presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, `silu`, or `clamp`, plus `avg` or `max` pooling. Use `--gelu-approximate tanh` for the faster GELU approximation. `--activation-clamp-min` and `--activation-clamp-max` optionally clamp the output of every non-clamp activation; `--activation clamp` requires one or both bounds. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
 
 ```bash
 python3 train.py emnist-byclass --model max --activation gelu --pooling max --channels 40,120,480 --hidden-dim 640 --batch-norm --dropout 0.2 --output-dir exports/emnist-max --epochs 50
+
+# GELU with its outputs clipped to [-1, 1]
+python3 train.py mnist --model large --activation gelu --gelu-approximate tanh \
+  --activation-clamp-min -1 --activation-clamp-max 1 --output-dir exports/gelu-clamped
 ```
 
 Every exported model includes its resolved configuration and explicit activation/pooling operations in its manifest, so `gui.py` and `export_model.py` can reload any supported combination.
@@ -69,7 +73,7 @@ python3 train.py emnist-byclass --model max --activation gelu --pooling max \
 
 Use `--no-augment`, `--normalization mnist`, `--class-balancing none`, `--scheduler none`, `--no-batch-norm`, and `--dropout 0` for ablations or legacy-style runs. `--class-balancing sampler` uses weighted sampling instead of weighted loss. Training writes `<model>.metrics.json`, which contains the validation confusion matrix and per-class accuracy; the same per-class summary is retained in the checkpoint manifest.
 
-Caching preserves augmentation: the trainer caches the deterministic preprocessed images, then creates a fresh affine transform for each cached batch directly on the model device. On CUDA, caching now defaults to `auto`: it keeps data in VRAM when there is ample free memory, eliminating DataLoader and image-processing stalls that are especially noticeable with small batches. Use `--cache-dataset cuda` to force VRAM caching, `--cache-dataset ram` to keep it in system RAM and stream each batch to the GPU, or `--cache-dataset none` to disable caching. With 50 GB VRAM, CUDA caching is generally the faster option; RAM caching is useful when the dataset is too large for VRAM. CUDA training also compiles by default with a low-overhead mode; use `--no-compile` if its startup cost is not worthwhile for a short run.
+Caching preserves augmentation: the trainer caches the deterministic preprocessed images, then creates a fresh affine transform for each cached batch directly on the model device. On CUDA, caching now defaults to `auto`: it keeps data in VRAM when there is ample free memory, eliminating DataLoader and image-processing stalls that are especially noticeable with small batches. Cache transfers stage 4,096 samples at a time by default, independently of the training `--batch-size`, so choosing a small training batch does not turn the initial GPU load into thousands of tiny transfers. Use `--cache-batch-size` to tune that staging size, `--cache-dataset cuda` to force VRAM caching, `--cache-dataset ram` to keep it in system RAM and stream each batch to the GPU, or `--cache-dataset none` to disable caching. With 50 GB VRAM, CUDA caching is generally the faster option; RAM caching is useful when the dataset is too large for VRAM. CUDA training also compiles by default with a low-overhead mode; use `--no-compile` if its startup cost is not worthwhile for a short run.
 
 ## Faster training
 
