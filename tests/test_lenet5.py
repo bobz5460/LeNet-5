@@ -60,7 +60,17 @@ class LeNet5Tests(unittest.TestCase):
         self.assertEqual(len(clamp_layers), 4)
         self.assertTrue(all(layer["min"] == -0.5 and layer["max"] == 1.0 for layer in clamp_layers))
         layer_ops = [layer["op"] for layer in meta["layers"]]
-        self.assertTrue(all(layer_ops[index + 1] == "gelu" for index, op in enumerate(layer_ops[:-1]) if op == "clamp"))
+        self.assertTrue(all(layer_ops[index - 1] == "gelu" for index, op in enumerate(layer_ops[1:], 1) if op == "clamp"))
+        activations: list[torch.Tensor] = []
+        hooks = [module.register_forward_hook(lambda _, __, output: activations.append(output))
+                 for module in model.modules() if module.__class__.__name__ == "ActivationClamp"]
+        try:
+            model(torch.randn(2, 1, 32, 32) * 100)
+        finally:
+            for hook in hooks:
+                hook.remove()
+        self.assertEqual(len(activations), 4)
+        self.assertTrue(all(torch.all(values >= -0.5) and torch.all(values <= 1.0) for values in activations))
         self.assertEqual(model_from_architecture(meta, 10).config, config)
 
     def test_clamp_activation_requires_a_bound(self):

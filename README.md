@@ -42,12 +42,12 @@ EMNIST files are transposed in storage. The trainer corrects that source-only de
 
 ## Model configuration
 
-Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets default to GELU, max pooling, batch normalization, and 0.15 classifier dropout; all presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, `silu`, or `clamp`, plus `avg` or `max` pooling. Use `--gelu-approximate tanh` for the faster GELU approximation. `--activation-clamp-min` and `--activation-clamp-max` optionally bound every non-clamp activation's input (after convolution/normalization, before the activation); `--activation clamp` requires one or both bounds. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
+Three LeNet-style presets are available: `lenet5` (6→16→120 channels), `large` (16→48→192), and `max` (32→96→384 with a 512-unit hidden layer). `lenet5` with its defaults is the original LeNet-5 topology: Tanh, average pooling, and no normalization or dropout. The wider presets default to GELU, max pooling, batch normalization, and 0.15 classifier dropout; all presets can use `tanh`, `relu`, `gelu`, `sigmoid`, `leaky_relu`, `elu`, `silu`, or `clamp`, plus `avg` or `max` pooling. Use `--gelu-approximate tanh` for the faster GELU approximation. `--activation-clamp-min` and `--activation-clamp-max` optionally clamp the output of every non-clamp activation; `--activation clamp` requires one or both bounds. You can override convolution widths, hidden layer, batch normalization, and classifier dropout:
 
 ```bash
 python3 train.py emnist-byclass --model max --activation gelu --pooling max --channels 40,120,480 --hidden-dim 640 --batch-norm --dropout 0.2 --output-dir exports/emnist-max --epochs 50
 
-# GELU with its inputs clipped to [-1, 1]
+# GELU with its outputs clipped to [-1, 1]
 python3 train.py mnist --model large --activation gelu --gelu-approximate tanh \
   --activation-clamp-min -1 --activation-clamp-max 1 --output-dir exports/gelu-clamped
 ```
@@ -65,7 +65,7 @@ EMNIST uses training-only affine augmentation by default (rotation, translation,
 ```bash
 python3 train.py emnist-byclass --model max --activation gelu --pooling max \
   --batch-norm --dropout 0.2 --epochs 50 --batch-size 1024 \
-  c
+  --rotation-degrees 15 --translate 0.12 --scale-min 0.85 --scale-max 1.15 --shear-degrees 12 \
   --class-balancing loss --class-weight-power 0.5 \
   --optimizer adamw --learning-rate 1e-3 --weight-decay 1e-4 --scheduler cosine \
   --output-dir exports/emnist-max

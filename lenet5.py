@@ -99,10 +99,9 @@ class ActivationClamp(nn.Module):
 def activation_layers(config: LeNetConfig) -> list[nn.Module]:
     if config.activation == "clamp":
         return [activation_layer(config)]
-    layers: list[nn.Module] = []
-    if config.activation != "clamp" and (config.activation_clamp_min is not None or config.activation_clamp_max is not None):
+    layers: list[nn.Module] = [activation_layer(config)]
+    if config.activation_clamp_min is not None or config.activation_clamp_max is not None:
         layers.append(ActivationClamp(config.activation_clamp_min, config.activation_clamp_max))
-    layers.append(activation_layer(config))
     return layers
 
 
@@ -183,9 +182,9 @@ def architecture_metadata(num_classes: int, variant: str = "lenet5", config: LeN
         name = f"features.{feature_index}"; layers.append(conv(name, in_channels, out_channels)); feature_index += 1
         if config.batch_norm:
             layers.append(batch_norm(f"features.{feature_index}", out_channels)); feature_index += 1
+        layers.append(act(f"features.{feature_index}")); feature_index += 1
         if config.activation != "clamp" and (config.activation_clamp_min is not None or config.activation_clamp_max is not None):
             layers.append(clamp(f"features.{feature_index}")); feature_index += 1
-        layers.append(act(f"features.{feature_index}")); feature_index += 1
         if has_pool:
             layers.append(pool(f"features.{feature_index}")); feature_index += 1
     classifier_index = 0
@@ -196,9 +195,9 @@ def architecture_metadata(num_classes: int, variant: str = "lenet5", config: LeN
     classifier_index += 2
     if config.batch_norm:
         layers.append(batch_norm(f"classifier.{classifier_index}", config.hidden_dim)); classifier_index += 1
+    layers.append(act(f"classifier.{classifier_index}")); classifier_index += 1
     if config.activation != "clamp" and (config.activation_clamp_min is not None or config.activation_clamp_max is not None):
         layers.append(clamp(f"classifier.{classifier_index}")); classifier_index += 1
-    layers.append(act(f"classifier.{classifier_index}")); classifier_index += 1
     if config.dropout:
         layers.append({"name": f"classifier.{classifier_index}", "op": "dropout", "p": config.dropout, "inference_behavior": "identity"}); classifier_index += 1
     layers.append({"name": f"classifier.{classifier_index}", "op": "linear", "weight_key": f"classifier.{classifier_index}.weight", "bias_key": f"classifier.{classifier_index}.bias", "weight_layout": "OI", "in_features": config.hidden_dim, "out_features": num_classes})
